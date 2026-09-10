@@ -1709,6 +1709,10 @@ LaunchResult spawnGpuScreenRecorder(const RecordingRequest& request, const std::
     posix_spawn_file_actions_t fileActions {};
     if (const int error = posix_spawn_file_actions_init(&fileActions); error != 0)
         return {.success = false, .error = std::string("spawn setup failed: ") + std::strerror(error)};
+    // The recorder runs in its own background process group; give it /dev/null
+    // on stdin so a child that reads the inherited terminal cannot be
+    // SIGTTIN-stopped, which would leave the group unkillable by SIGINT.
+    posix_spawn_file_actions_addopen(&fileActions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
     auto shell = trustedProgramPath("sh");
     if (!shell) { posix_spawn_file_actions_destroy(&fileActions); return {.success = false, .error = "trusted sh unavailable"}; }
     process = spawnSupervisedProcess(*shell, args, envp.data(), fileActions, true);
