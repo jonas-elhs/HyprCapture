@@ -11,7 +11,7 @@
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/config/ConfigValue.hpp>
-#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/desktop/view/window/WindowMetadata.hpp>
@@ -2260,7 +2260,7 @@ bool shouldCaptureWindow(const PHLWINDOW& window) {
     if (g_pHyprRenderer)
         return g_pHyprRenderer->shouldRenderWindow(window);
 
-    return (window->m_state & Desktop::View::WINDOW_STATE_PINNED) || window->m_workspace->isVisible();
+    return (window->m_state & Desktop::View::WINDOW_STATE_PINNED) || window->m_workspace->visible();
 }
 
 bool isLiveWindowCaptureTarget(const PHLWINDOW& window) {
