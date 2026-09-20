@@ -41,6 +41,8 @@ constexpr std::array  kLuaFunctionNames = {
     "record_stop",
     "record_start",
     "window_capture",
+    "window_stream_start",
+    "window_stream_stop",
     "export_pipe",
     "cancel",
     "dispatch",
@@ -139,6 +141,7 @@ void registerConfigValues() {
     addBoolConfig("clipboard", "Copy captures to the clipboard", true);
     addBoolConfig("show_thumbnail", "Show a result thumbnail after capture", true);
     addBoolConfig("include_cursor", "Include the cursor in captures", false);
+    addBoolConfig("remember_settings", "Restore the previous interactive capture settings", false);
     addBoolConfig("allow_quick", "Enable no-confirmation quick capture calls", false);
     addBoolConfig("confirm_before_capture", "Require explicit confirmation after target selection for normal open captures", false);
     addBoolConfig("fusion_mode", "Fuse region and window interactions in one overlay", false);
@@ -158,12 +161,20 @@ void registerConfigValues() {
     addStringConfig("record_fps_options", "Recording frame rate choices", "15 24 30 60");
     addIntConfig("record_window_fps_limit", "Compositor window recording FPS cap", 12);
     addIntConfig("record_window_real_bg_fps_limit", "Real-background window recording FPS cap", 8);
-    addStringConfig("record_codec", "Default recording codec", "libx264");
+    addIntConfig("record_audio_echo_cancellation", "DTLN microphone AEC: -1 auto, 0 off, 1 on", -1);
+    addStringConfig("record_audio_echo_backend", "AEC backend: cpu or experimental npu", "cpu");
+    addStringConfig("record_audio_mix", "Audio mixing: manual, auto-balance, voice-priority", "voice-priority");
+    addIntConfig("record_audio_system_gain", "System gain in dB (-61=mute, max 24)", 0);
+    addIntConfig("record_audio_mic_gain", "Microphone gain in dB (-61=mute, max 24)", 0);
+    addStringConfig("record_audio", "Recording sound: off, system, microphone, mix", "off");
+    addStringConfig("record_audio_output", "Sound source: auto, default, output device, or window:<address>", "auto");
+    addStringConfig("record_audio_input", "Microphone source or default", "default");
+    addStringConfig("record_codec", "Default recording codec", "auto");
     addStringConfig("record_transparent_codec", "Default transparent recording codec", "auto");
     addBoolConfig("record_solid_alpha", "Keep alpha outside follow-system/white/black window recording content when the encoder supports it", false);
     addStringConfig("record_preset", "FFmpeg preset", "veryfast");
     addStringConfig("record_gsr_flags", "Extra gpu-screen-recorder flags", "");
-    addStringConfig("record_window_backend", "Window recording backend", "compositor");
+    addStringConfig("record_window_backend", "Recording backend (auto, compositor, or gsr-visible)", "auto");
     addIntConfig("record_max_seconds", "Optional automatic recording stop in seconds", 0);
     addIntConfig("record_countdown_seconds", "Recording start countdown in seconds", 0);
     addIntConfig("thumbnail_timeout_ms", "Thumbnail auto-close timeout in milliseconds", 5000);
@@ -199,6 +210,7 @@ hyprcapture::CaptureDefaults readDefaults() {
     defaults.showThumbnail = configBool("show_thumbnail", defaults.showThumbnail);
     defaults.screenshotNotification = configBool("screenshot_notification", defaults.screenshotNotification);
     defaults.includeCursor = configBool("include_cursor", defaults.includeCursor);
+    defaults.rememberSettings = configBool("remember_settings", defaults.rememberSettings);
     defaults.allowQuick = configBool("allow_quick", defaults.allowQuick);
     defaults.confirmBeforeCapture = configBool("confirm_before_capture", defaults.confirmBeforeCapture);
     defaults.fushionMode = configBool("fusion_mode", defaults.fushionMode) || configBool("fushion_mode", defaults.fushionMode);
@@ -218,6 +230,16 @@ hyprcapture::CaptureDefaults readDefaults() {
     defaults.recordFilenameTemplate = configString("record_filename_template", defaults.recordFilenameTemplate);
     defaults.recordFormat = configString("record_format", defaults.recordFormat);
     defaults.recordTransparentFormat = configString("record_transparent_format", defaults.recordTransparentFormat);
+    defaults.recordAudioEchoCancellation = std::clamp<std::int64_t>(configInt("record_audio_echo_cancellation", -1), -1, 1);
+    defaults.recordAudioEchoBackend = configString("record_audio_echo_backend", "cpu");
+    if (defaults.recordAudioEchoBackend != "npu") defaults.recordAudioEchoBackend = "cpu";
+    defaults.recordAudioMix = configString("record_audio_mix", "voice-priority");
+    if (defaults.recordAudioMix != "manual" && defaults.recordAudioMix != "auto-balance" && defaults.recordAudioMix != "voice-priority") defaults.recordAudioMix = "voice-priority";
+    defaults.recordAudioSystemGain = std::clamp<std::int64_t>(configInt("record_audio_system_gain", 0), -61, 24);
+    defaults.recordAudioMicGain = std::clamp<std::int64_t>(configInt("record_audio_mic_gain", 0), -61, 24);
+    defaults.recordAudio = hyprcapture::parseRecordAudio(configString("record_audio", "off"));
+    defaults.recordAudioOutput = configString("record_audio_output", "auto");
+    defaults.recordAudioInput = configString("record_audio_input", "default");
     defaults.recordCodec = configString("record_codec", defaults.recordCodec);
     defaults.recordTransparentCodec = configString("record_transparent_codec", defaults.recordTransparentCodec);
     defaults.recordSolidAlpha = configBool("record_solid_alpha", defaults.recordSolidAlpha);
@@ -308,7 +330,7 @@ SDispatchResult dispatchRecordStop(const std::string&) {
 }
 
 SDispatchResult dispatchRecordStart(const std::string& args) {
-    const auto result = hyprcapture::startRecordingFromRequestFile(args);
+    const auto result = hyprcapture::startRecordingFromRequestFile(args, readDefaults().helper);
     if (!result.success)
         hyprcapture::notifyUser(result.error, hyprcapture::NotificationLevel::Error, 5000);
     return dispatchResult(result);
@@ -326,6 +348,14 @@ SDispatchResult dispatchExportPipe(const std::string& args) {
     if (!result.success)
         hyprcapture::notifyUser(result.error, hyprcapture::NotificationLevel::Error, 5000);
     return dispatchResult(result);
+}
+
+SDispatchResult dispatchWindowStreamStart(const std::string& args) {
+    return dispatchResult(hyprcapture::startWindowStreamFromRequestFile(args));
+}
+
+SDispatchResult dispatchWindowStreamStop(const std::string& args) {
+    return dispatchResult(hyprcapture::stopWindowStreamFromRequestFile(args));
 }
 
 SDispatchResult dispatchCancel(const std::string&) {
@@ -362,6 +392,10 @@ std::string normalizeHyprcaptureAction(std::string action) {
         return "window_capture";
     if (action == "exportPipe")
         return "export_pipe";
+    if (action == "windowStreamStart")
+        return "window_stream_start";
+    if (action == "windowStreamStop")
+        return "window_stream_stop";
 
     std::ranges::replace(action, '-', '_');
     return action;
@@ -399,6 +433,14 @@ int luaExportPipe(lua_State* L) {
     return luaDispatchResult(L, dispatchExportPipe(luaOptionalString(L, 1)));
 }
 
+int luaWindowStreamStart(lua_State* L) {
+    return luaDispatchResult(L, dispatchWindowStreamStart(luaOptionalString(L, 1)));
+}
+
+int luaWindowStreamStop(lua_State* L) {
+    return luaDispatchResult(L, dispatchWindowStreamStop(luaOptionalString(L, 1)));
+}
+
 int luaCancel(lua_State* L) {
     return luaDispatchResult(L, dispatchCancel(""));
 }
@@ -423,6 +465,10 @@ int luaDispatch(lua_State* L) {
         return luaDispatchResult(L, dispatchWindowCapture(args));
     if (action == "export_pipe")
         return luaDispatchResult(L, dispatchExportPipe(args));
+    if (action == "window_stream_start")
+        return luaDispatchResult(L, dispatchWindowStreamStart(args));
+    if (action == "window_stream_stop")
+        return luaDispatchResult(L, dispatchWindowStreamStop(args));
     if (action == "cancel")
         return luaDispatchResult(L, dispatchCancel(args));
 
@@ -463,6 +509,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         registerLuaFunction("record_start", luaRecordStart);
         registerLuaFunction("window_capture", luaWindowCapture);
         registerLuaFunction("export_pipe", luaExportPipe);
+        registerLuaFunction("window_stream_start", luaWindowStreamStart);
+        registerLuaFunction("window_stream_stop", luaWindowStreamStop);
         registerLuaFunction("cancel", luaCancel);
         registerLuaFunction("dispatch", luaDispatch);
     }
@@ -482,7 +530,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "HyprCapture",
         .description = "Hyprland-only screenshot overlay",
         .author = "wilf",
-        .version = "0.2.7",
+        .version = "0.2.8",
     };
 }
 

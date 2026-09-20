@@ -3,6 +3,7 @@
 #include "shared/config.hpp"
 
 #include <string>
+#include <optional>
 
 namespace hyprcapture {
 
@@ -19,8 +20,10 @@ struct LaunchResult {
     std::string error;
 };
 
+std::optional<std::string> recordingHelperPath(const CaptureDefaults& defaults);
+
 LaunchResult launchHelper(const LaunchRequest& request);
-LaunchResult launchRecordingResultHelper(const CaptureDefaults& defaults, const std::string& outputPath);
+LaunchResult launchRecordingResultHelper(const CaptureDefaults& defaults, const std::string& outputPath, const std::string& pendingSocket = {});
 LaunchResult launchRecordingTranscodeHelper(const CaptureDefaults& defaults,
                                             const std::string&     inputPath,
                                             const std::string&     outputPath,

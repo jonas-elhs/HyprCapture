@@ -14,7 +14,8 @@ enum class OverlayScope { Fix, Focus, All };
 enum class WindowBackground { White, Black, FollowSystem, Real, Transparent };
 enum class DecorationPolicy { Keep, Remove };
 enum class WindowWheelScope { Workspace, UnderCursor };
-enum class RecordWindowBackend { Compositor, GsrVisible };
+enum class RecordAudio { Off, System, Microphone, Mix };
+enum class RecordWindowBackend { Auto, Compositor, GsrVisible };
 enum class NotificationBackend { Hyprland, System };
 enum class WatermarkPosition { UpLeft, UpMiddle, UpRight, LeftMiddle, Central, RightMiddle, DownLeft, DownMiddle, DownRight };
 
@@ -31,6 +32,7 @@ struct CaptureDefaults {
     bool             showThumbnail = true;
     bool             screenshotNotification = true;
     bool             includeCursor = false;
+    bool             rememberSettings = false;
     bool             allowQuick = false;
     bool             confirmBeforeCapture = false;
     bool             fushionMode = false;
@@ -48,12 +50,20 @@ struct CaptureDefaults {
     std::string      recordFilenameTemplate = "Recording-%Y-%m-%d-%H%M%S.mp4";
     std::string      recordFormat = "mp4";
     std::string      recordTransparentFormat = "webm";
-    std::string      recordCodec = "libx264";
+    std::string      recordCodec = "auto";
     std::string      recordTransparentCodec = "auto";
     bool             recordSolidAlpha = false;
     std::string      recordPreset = "veryfast";
     std::string      recordGsrFlags;
-    RecordWindowBackend recordWindowBackend = RecordWindowBackend::Compositor;
+    RecordAudio      recordAudio = RecordAudio::Off;
+    std::int64_t     recordAudioEchoCancellation = -1; // -1 auto, 0 off, 1 on
+    std::string      recordAudioEchoBackend = "cpu"; // npu is experimental/explicit
+    std::string      recordAudioMix = "voice-priority";
+    std::int64_t     recordAudioSystemGain = 0; // dB; -61 means muted
+    std::int64_t     recordAudioMicGain = 0;
+    std::string      recordAudioOutput = "auto";
+    std::string      recordAudioInput = "default";
+    RecordWindowBackend recordWindowBackend = RecordWindowBackend::Auto;
     std::int64_t     recordFps = 30;
     std::string      recordFpsOptions = "15 24 30 60";
     std::int64_t     recordWindowFpsLimit = 12;
@@ -79,7 +89,8 @@ OverlayScope parseOverlayScope(std::string_view value, OverlayScope fallback = O
 WindowBackground parseWindowBackground(std::string_view value, WindowBackground fallback = WindowBackground::FollowSystem);
 DecorationPolicy parseDecorationPolicy(std::string_view value, DecorationPolicy fallback = DecorationPolicy::Keep);
 WindowWheelScope parseWindowWheelScope(std::string_view value, WindowWheelScope fallback = WindowWheelScope::Workspace);
-RecordWindowBackend parseRecordWindowBackend(std::string_view value, RecordWindowBackend fallback = RecordWindowBackend::Compositor);
+RecordAudio parseRecordAudio(std::string_view value, RecordAudio fallback = RecordAudio::Off);
+RecordWindowBackend parseRecordWindowBackend(std::string_view value, RecordWindowBackend fallback = RecordWindowBackend::Auto);
 NotificationBackend parseNotificationBackend(std::string_view value, NotificationBackend fallback = NotificationBackend::Hyprland);
 WatermarkPosition parseWatermarkPosition(std::string_view value, WatermarkPosition fallback = WatermarkPosition::Central);
 std::string normalizeRecordFormat(std::string_view value);
@@ -91,6 +102,7 @@ std::string toString(OverlayScope value);
 std::string toString(WindowBackground value);
 std::string toString(DecorationPolicy value);
 std::string toString(WindowWheelScope value);
+std::string toString(RecordAudio value);
 std::string toString(RecordWindowBackend value);
 std::string toString(NotificationBackend value);
 std::string toString(WatermarkPosition value);

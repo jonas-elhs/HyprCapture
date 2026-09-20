@@ -1,4 +1,5 @@
 #include "shared/config.hpp"
+#include "shared/audio_source.hpp"
 #include "shared/protocol.hpp"
 
 #include <cstdlib>
@@ -53,6 +54,7 @@ int main() {
     require(CaptureDefaults{}.windowWheelScope == WindowWheelScope::Workspace, "window wheel scope default");
     require(CaptureDefaults{}.screenshotNotification, "screenshot notification default");
     require(CaptureDefaults{}.notificationBackend == NotificationBackend::Hyprland, "notification backend default");
+    require(CaptureDefaults{}.recordWindowBackend == RecordWindowBackend::Auto, "record backend default");
     require(CaptureDefaults{}.fullscreenPreviewRounding == "auto", "fullscreen preview rounding default");
 
     require(parseFullscreenScope("all-monitors") == FullscreenScope::All, "all monitor scope parse");
@@ -69,6 +71,7 @@ int main() {
     require(parseWindowWheelScope("under_cursor") == WindowWheelScope::UnderCursor, "under cursor window wheel scope parse");
     require(parseWindowWheelScope("cursor") == WindowWheelScope::UnderCursor, "cursor window wheel scope alias");
     require(parseWindowWheelScope("bad", WindowWheelScope::UnderCursor) == WindowWheelScope::UnderCursor, "window wheel scope fallback");
+    require(parseRecordWindowBackend("automatic") == RecordWindowBackend::Auto, "automatic record backend alias");
     require(parseRecordWindowBackend("visible_gsr") == RecordWindowBackend::GsrVisible, "visible gsr backend parse");
     require(parseNotificationBackend("libnotify") == NotificationBackend::System, "libnotify notification backend alias");
     require(parseNotificationBackend("dbus") == NotificationBackend::System, "dbus notification backend alias");
@@ -91,6 +94,7 @@ int main() {
     require(toString(FullscreenScope::PerMonitor) == "per-monitor", "per monitor stringify");
     require(toString(OverlayScope::Focus) == "focus", "focus overlay scope stringify");
     require(toString(WindowBackground::FollowSystem) == "follow-system", "follow system stringify");
+    require(toString(RecordWindowBackend::Auto) == "auto", "auto record backend stringify");
     require(toString(RecordWindowBackend::GsrVisible) == "gsr-visible", "visible gsr backend stringify");
     require(toString(NotificationBackend::System) == "system", "system notification backend stringify");
     require(toString(WatermarkPosition::DownMiddle) == "down-middle", "down middle stringify");
@@ -238,6 +242,7 @@ int main() {
     require(json.find("\"thumbnailMonitor\":\"DP-2\"") != std::string::npos, "thumbnail monitor json");
     require(json.find("\"windowBackground\":\"follow-system\"") != std::string::npos, "window background json");
     require(json.find("\"recordTransparentFormat\":\"webm\"") != std::string::npos, "transparent record format json");
+    require(json.find("\"recordCodec\":\"auto\"") != std::string::npos, "record codec default json");
     require(json.find("\"recordTransparentCodec\":\"auto\"") != std::string::npos, "transparent record codec json");
     require(json.find("\"recordSolidAlpha\":true") != std::string::npos, "solid alpha record json");
     require(json.find("\"recordSaveDir\":\"$XDG_VIDEOS_DIR/Screenrecords\"") != std::string::npos, "record save dir json");
@@ -283,6 +288,7 @@ int main() {
     require(decoded->defaults.thumbnailMonitor == "DP-2", "decoded thumbnail monitor");
     require(decoded->defaults.fushionMode, "decoded fushion mode");
     require(decoded->defaults.recordTransparentFormat == "webm", "decoded transparent record format");
+    require(decoded->defaults.recordCodec == "auto", "decoded record codec default");
     require(decoded->defaults.recordTransparentCodec == "auto", "decoded transparent record codec");
     require(decoded->defaults.recordSolidAlpha, "decoded solid alpha record");
     require(decoded->defaults.recordSaveDir == "$XDG_VIDEOS_DIR/Screenrecords", "decoded record save dir");
@@ -443,6 +449,51 @@ int main() {
     require(decodedRecording->defaults.recordMaxSeconds == 10, "decoded recording max seconds");
     require(decodedRecording->defaults.recordCountdownSeconds == 3, "decoded recording countdown seconds");
     require(decodedRecording->defaults.recordWindowBackend == RecordWindowBackend::GsrVisible, "decoded recording window backend");
+    require(CaptureDefaults{}.recordAudio == RecordAudio::Off, "sound defaults off");
+    require(CaptureDefaults{}.recordAudioOutput == "auto", "sound source defaults auto");
+    require(CaptureDefaults{}.recordAudioEchoCancellation == -1 && CaptureDefaults{}.recordAudioEchoBackend == "cpu", "AEC defaults automatic CPU");
+    for (auto policy : {-1, 0, 1}) for (const auto* backend : {"cpu", "npu"}) {
+        recording.defaults.recordAudioEchoCancellation = policy;
+        recording.defaults.recordAudioEchoBackend = backend;
+        const auto decoded = decodeRecordingRequestJson(encodeRecordingRequestJson(recording));
+        require(decoded && decoded->defaults.recordAudioEchoCancellation == policy && decoded->defaults.recordAudioEchoBackend == backend, "AEC policy/backend roundtrip");
+    }
+    auto invalidAec = nlohmann::json::parse(encodeRecordingRequestJson(recording));
+    invalidAec["defaults"]["recordAudioEchoBackend"] = "gpu";
+    require(!decodeRecordingRequestJson(invalidAec.dump()), "AEC rejects implicit GPU backend");
+    invalidAec["defaults"]["recordAudioEchoBackend"] = "cpu";
+    invalidAec["defaults"]["recordAudioEchoCancellation"] = 2;
+    require(!decodeRecordingRequestJson(invalidAec.dump()), "AEC rejects invalid policy");
+    recording.defaults.recordAudioEchoBackend = "cpu";
+    require(audio::resolveOutput("auto", CaptureMode::Fullscreen, "0x123") == "default", "fullscreen auto source");
+    require(audio::resolveOutput("auto", CaptureMode::Region, "0x123") == "default", "region auto source");
+    require(audio::resolveOutput("auto", CaptureMode::Window, "0x123") == "window:0x123", "window auto source");
+    require(audio::resolveOutput("auto", CaptureMode::Window, "") == "window:", "unselected window never captures desktop");
+    require(audio::resolveOutput("window:0x456", CaptureMode::Region, "0x123") == "window:0x456", "explicit window overrides auto target");
+    require(audio::resolveOutput("default", CaptureMode::Window, "0x123") == "default", "explicit default overrides window auto");
+    for (auto mode : {RecordAudio::Off, RecordAudio::System, RecordAudio::Microphone, RecordAudio::Mix}) {
+        recording.defaults.recordAudio = mode;
+        recording.defaults.recordAudioEchoCancellation = mode != RecordAudio::Off;
+        recording.defaults.recordAudioMix = "manual";
+        recording.defaults.recordAudioSystemGain = -6;
+        recording.defaults.recordAudioMicGain = 12;
+        recording.defaults.recordAudioOutput = "alsa_output.test.stereo";
+        recording.defaults.recordAudioInput = "mic name with spaces";
+        const auto decoded = decodeRecordingRequestJson(encodeRecordingRequestJson(recording));
+        require(decoded && decoded->defaults.recordAudio == mode, "sound mode roundtrip");
+        require(decoded->defaults.recordAudioEchoCancellation == recording.defaults.recordAudioEchoCancellation, "echo cancellation roundtrip");
+        require(decoded->defaults.recordAudioMix == "manual" && decoded->defaults.recordAudioSystemGain == -6 && decoded->defaults.recordAudioMicGain == 12, "mix settings roundtrip");
+        require(decoded->defaults.recordAudioOutput == recording.defaults.recordAudioOutput, "output device roundtrip");
+        require(decoded->defaults.recordAudioInput == recording.defaults.recordAudioInput, "input device roundtrip");
+    }
+    auto legacySound = nlohmann::json::parse(encodeRecordingRequestJson(recording));
+    for (const auto* key : {"recordAudio", "recordAudioOutput", "recordAudioInput"}) legacySound["defaults"].erase(key);
+    auto legacySoundDecoded = decodeRecordingRequestJson(legacySound.dump());
+    require(legacySoundDecoded && legacySoundDecoded->defaults.recordAudio == RecordAudio::Off && legacySoundDecoded->defaults.recordAudioInput == "default", "legacy requests remain silent");
+    legacySound["defaults"]["recordAudio"] = "invalid";
+    require(!decodeRecordingRequestJson(legacySound.dump()), "invalid sound mode rejected");
+    legacySound["defaults"]["recordAudio"] = 12;
+    require(!decodeRecordingRequestJson(legacySound.dump()), "non-string sound mode rejected");
     require(!decodeRecordingRequestJson("{}").has_value(), "missing recording request fields rejected");
 
     require(!decodeSessionJson("{not json").has_value(), "malformed json is rejected");

@@ -1,3 +1,4 @@
+#include "audio/helper.hpp"
 #include "shared/config.hpp"
 #include "ui/capture_overlay.hpp"
 #include "ui/clipboard_utils.hpp"
@@ -10,6 +11,9 @@
 #include <QCommandLineParser>
 #include <QCursor>
 #include <QDir>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusVirtualObject>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -17,6 +21,9 @@
 #include <QImageReader>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
+#include <QLocalSocket>
+#include <functional>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPixmap>
@@ -195,10 +202,9 @@ DispatchCommandResult dispatchRecordingStart(const QString& requestPath) {
     return evalHyprcaptureLuaFunction(QStringLiteral("record_start"), requestPath);
 }
 
-class RecordingCountdownWindow final : public QWidget {
+class RecordingCountdownDisplay final : public QWidget {
   public:
-    RecordingCountdownWindow(QString requestPath, int seconds)
-        : QWidget(nullptr), m_requestPath(std::move(requestPath)), m_remaining(std::clamp(seconds, 1, MAX_RECORD_COUNTDOWN_SECONDS)) {
+    explicit RecordingCountdownDisplay(QScreen* screen) : QWidget(nullptr) {
         setWindowTitle(QStringLiteral("HyprCapture Countdown"));
         setWindowFlags(Qt::FramelessWindowHint | Qt::Tool | Qt::WindowStaysOnTopHint | Qt::WindowDoesNotAcceptFocus | Qt::WindowTransparentForInput);
         setAttribute(Qt::WA_TranslucentBackground);
@@ -206,15 +212,14 @@ class RecordingCountdownWindow final : public QWidget {
         setAttribute(Qt::WA_ShowWithoutActivating);
         setFocusPolicy(Qt::NoFocus);
 
-        QRect desktop;
-        for (const auto* screen : QGuiApplication::screens())
-            desktop = desktop.united(screen->geometry());
-        if (!desktop.isValid() && QGuiApplication::primaryScreen())
-            desktop = QGuiApplication::primaryScreen()->geometry();
-        setGeometry(desktop.isValid() ? desktop : QRect(0, 0, 1280, 720));
+        setGeometry(screen ? screen->geometry() : QRect(0, 0, 1280, 720));
 
         winId();
+        if (screen && windowHandle())
+            windowHandle()->setScreen(screen);
         if (auto* layerWindow = LayerShellQt::Window::get(windowHandle())) {
+            if (screen)
+                layerWindow->setScreen(screen);
             layerWindow->setScope("hyprcapture-countdown");
             layerWindow->setLayer(LayerShellQt::Window::LayerOverlay);
             layerWindow->setAnchors(LayerShellQt::Window::Anchors{LayerShellQt::Window::AnchorTop} | LayerShellQt::Window::AnchorBottom |
@@ -224,14 +229,11 @@ class RecordingCountdownWindow final : public QWidget {
             layerWindow->setDesiredSize(QSize(0, 0));
         }
 
-        connect(&m_timer, &QTimer::timeout, this, [this] { advance(); });
-        m_timer.setInterval(1000);
     }
 
-    void start() {
-        show();
-        raise();
-        m_timer.start();
+    void setRemaining(int remaining) {
+        m_remaining = remaining;
+        update();
     }
 
   protected:
@@ -242,11 +244,10 @@ class RecordingCountdownWindow final : public QWidget {
         painter.fillRect(rect(), Qt::transparent);
         painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
 
-        const QRect screen = countdownScreenRect();
-        const int minDim = std::max(1, std::min(screen.width(), screen.height()));
+        const int minDim = std::max(1, std::min(width(), height()));
         const int maxDiameter = std::max(64, std::min(280, minDim - 32));
         const int diameter = std::clamp(minDim / 5, 64, maxDiameter);
-        const QPoint center = screen.center();
+        const QPoint center = rect().center();
         const QRectF badge(center.x() - diameter / 2.0, center.y() - diameter / 2.0, diameter, diameter);
         const QString text = QString::number(m_remaining);
 
@@ -265,28 +266,85 @@ class RecordingCountdownWindow final : public QWidget {
     }
 
   private:
-    QRect countdownScreenRect() const {
-        const QScreen* screen = QGuiApplication::screenAt(QCursor::pos());
-        if (!screen)
-            screen = QGuiApplication::primaryScreen();
-        const QRect screenGeometry = screen ? screen->geometry() : geometry();
-        return screenGeometry.translated(-geometry().topLeft()).intersected(rect());
+    int m_remaining = 0;
+};
+
+constexpr auto COUNTDOWN_SERVICE = "org.hyprcapture.RecordingCountdown";
+constexpr auto COUNTDOWN_PATH = "/org/hyprcapture/RecordingCountdown";
+constexpr auto COUNTDOWN_INTERFACE = "org.hyprcapture.RecordingCountdown";
+
+void cancelRecordingCountdown() {
+    const auto message = QDBusMessage::createMethodCall(QString::fromLatin1(COUNTDOWN_SERVICE), QString::fromLatin1(COUNTDOWN_PATH),
+                                                       QString::fromLatin1(COUNTDOWN_INTERFACE), QStringLiteral("Cancel"));
+    QDBusConnection::sessionBus().call(message, QDBus::Block, 1000);
+}
+
+class RecordingCountdownController final : public QDBusVirtualObject {
+  public:
+    RecordingCountdownController(QString requestPath, int seconds)
+        : m_requestPath(std::move(requestPath)), m_remaining(std::clamp(seconds, 1, MAX_RECORD_COUNTDOWN_SECONDS)) {
+        for (QScreen* screen : QGuiApplication::screens()) {
+            if (screen)
+                m_displays.push_back(std::make_unique<RecordingCountdownDisplay>(screen));
+        }
+        if (m_displays.empty())
+            m_displays.push_back(std::make_unique<RecordingCountdownDisplay>(QGuiApplication::primaryScreen()));
+        connect(&m_timer, &QTimer::timeout, this, [this] { advance(); });
+        m_timer.setInterval(1000);
     }
 
+    QString introspect(const QString&) const override {
+        return QStringLiteral("<interface name=\"org.hyprcapture.RecordingCountdown\"><method name=\"Cancel\"/></interface>");
+    }
+
+    bool handleMessage(const QDBusMessage& message, const QDBusConnection& connection) override {
+        if (message.interface() != QLatin1String(COUNTDOWN_INTERFACE) || message.member() != QStringLiteral("Cancel"))
+            return false;
+        m_cancelled = true;
+        m_timer.stop();
+        QFile::remove(m_requestPath);
+        for (auto& display : m_displays)
+            display->hide();
+        connection.send(message.createReply());
+        qApp->quit();
+        return true;
+    }
+
+    bool start() {
+        auto bus = QDBusConnection::sessionBus();
+        if (!bus.registerVirtualObject(QString::fromLatin1(COUNTDOWN_PATH), this) ||
+            !bus.registerService(QString::fromLatin1(COUNTDOWN_SERVICE))) {
+            QFile::remove(m_requestPath);
+            return false;
+        }
+        for (auto& display : m_displays) {
+            display->setRemaining(m_remaining);
+            display->show();
+            display->raise();
+        }
+        m_timer.start();
+        return true;
+    }
+
+  private:
     void advance() {
         --m_remaining;
         if (m_remaining <= 0) {
             startRecording();
             return;
         }
-        update();
+        for (auto& display : m_displays)
+            display->setRemaining(m_remaining);
     }
 
     void startRecording() {
         m_timer.stop();
-        hide();
+        for (auto& display : m_displays)
+            display->hide();
         qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
         QTimer::singleShot(120, this, [this] {
+            if (m_cancelled)
+                return;
             const auto result = dispatchRecordingStart(m_requestPath);
             if (!result.success)
                 QFile::remove(m_requestPath);
@@ -295,8 +353,10 @@ class RecordingCountdownWindow final : public QWidget {
     }
 
     QString m_requestPath;
+    bool    m_cancelled = false;
     int     m_remaining = 0;
     QTimer  m_timer;
+    std::vector<std::unique_ptr<RecordingCountdownDisplay>> m_displays;
 };
 
 bool isTrustedRecordingResultPath(const QString& path, const hyprcapture::CaptureDefaults& defaults) {
@@ -438,6 +498,94 @@ class ResultThumbnailCollection {
     std::vector<std::unique_ptr<ResultThumbnail>> m_thumbnails;
 };
 
+// Decode exactly the first video frame without blocking the UI event loop.
+void loadRecordingFirstFrame(const QString& path, QObject* context, std::function<void(const QPixmap&)> ready) {
+    const QString ffmpeg = hyprcapture::ui::trustedSystemProgram(QStringLiteral("ffmpeg"));
+    if (ffmpeg.isEmpty()) {
+        ready({});
+        return;
+    }
+    auto* process = new QProcess(context);
+    auto* timeout = new QTimer(process);
+    timeout->setSingleShot(true);
+    QObject::connect(timeout, &QTimer::timeout, process, [process] { process->kill(); });
+    process->setProcessEnvironment(hyprcapture::ui::trustedProcessEnvironment());
+    process->setProgram(ffmpeg);
+    process->setArguments({"-hide_banner", "-loglevel", "error", "-nostdin", "-i", path,
+                           "-map", "0:v:0", "-frames:v", "1", "-vf",
+                           "scale=720:480:force_original_aspect_ratio=decrease", "-f", "image2pipe", "-c:v", "png", "pipe:1"});
+    auto complete = [process, ready](bool success) {
+        QPixmap frame;
+        if (success)
+            frame.loadFromData(process->readAllStandardOutput(), "PNG");
+        if (!frame.isNull()) {
+            QPixmap canvas = recordingThumbnailPixmap(false);
+            QPainter painter(&canvas);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform);
+            const QSizeF bounds = canvas.deviceIndependentSize();
+            const QSizeF size = QSizeF(frame.size()).scaled(bounds, Qt::KeepAspectRatio);
+            painter.drawPixmap(QRectF(QPointF((bounds.width() - size.width()) / 2, (bounds.height() - size.height()) / 2), size), frame, frame.rect());
+            painter.end();
+            frame = canvas;
+        }
+        ready(frame);
+        process->deleteLater();
+    };
+    QObject::connect(process, &QProcess::finished, context, [complete](int code, QProcess::ExitStatus status) {
+        complete(code == 0 && status == QProcess::NormalExit);
+    });
+    QObject::connect(process, &QProcess::errorOccurred, context, [complete](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart)
+            complete(false);
+    });
+    process->start();
+    timeout->start(15000);
+}
+
+int showRecordingPending(const hyprcapture::CaptureDefaults& defaults, const QString& path, const QString& socketPath) {
+    const QByteArray nativeSocket = QFile::encodeName(socketPath);
+    struct stat socketStat {};
+    if (!defaults.showThumbnail || !QFileInfo(socketPath).isAbsolute() ||
+        !trustedDirectory(QFileInfo(socketPath).absolutePath()) ||
+        lstat(nativeSocket.constData(), &socketStat) != 0 || !S_ISSOCK(socketStat.st_mode) || socketStat.st_uid != geteuid())
+        return 1;
+    ResultThumbnailCollection thumbnails(recordingThumbnailPixmap(false), path, {}, {}, 0, true,
+                                         thumbnailScreens(QString::fromStdString(defaults.thumbnailMonitor)));
+    thumbnails.setTranscodeProgress(-1.0);
+    QLocalSocket socket;
+    QTimer poll;
+    QTimer watchdog;
+    watchdog.setSingleShot(true);
+    QByteArray response;
+    QObject::connect(&watchdog, &QTimer::timeout, qApp, &QApplication::quit);
+    QObject::connect(&socket, &QLocalSocket::errorOccurred, qApp, [](QLocalSocket::LocalSocketError error) {
+        if (error != QLocalSocket::PeerClosedError)
+            qApp->quit();
+    });
+    QObject::connect(&socket, &QLocalSocket::readyRead, qApp, [&] {
+        response += socket.readAll();
+        if (!response.contains('\n'))
+            return;
+        const auto state = QJsonDocument::fromJson(response).object();
+        if (state.value("phase").toString() != "finalizing" || state.value("output").toString() != path) {
+            qApp->quit();
+            return;
+        }
+        thumbnails.show();
+        watchdog.start(3000);
+    });
+    QObject::connect(&poll, &QTimer::timeout, qApp, [&] {
+        if (socket.state() != QLocalSocket::UnconnectedState)
+            return;
+        response.clear();
+        socket.connectToServer(socketPath, QIODevice::ReadOnly);
+    });
+    poll.start(100);
+    watchdog.start(3000);
+    socket.connectToServer(socketPath, QIODevice::ReadOnly);
+    return qApp->exec();
+}
+
 int showRecordingResult(const hyprcapture::CaptureDefaults& defaults, const QString& path) {
     if (!isTrustedRecordingResultPath(path, defaults))
         return 1;
@@ -463,7 +611,14 @@ int showRecordingResult(const hyprcapture::CaptureDefaults& defaults, const QStr
                                          static_cast<int>(defaults.thumbnailTimeoutMs),
                                          true,
                                          thumbnailScreens(QString::fromStdString(defaults.thumbnailMonitor)));
+    thumbnails.setTranscodeProgress(-1.0);
     thumbnails.show();
+    QObject decoderContext;
+    loadRecordingFirstFrame(canonicalPath, &decoderContext, [&](const QPixmap& frame) {
+        if (!frame.isNull())
+            thumbnails.setImagePixmap(frame);
+        thumbnails.finishTranscodeProgress(true, static_cast<int>(defaults.thumbnailTimeoutMs));
+    });
     return qApp->exec();
 }
 
@@ -592,8 +747,10 @@ int showRecordingTranscode(const hyprcapture::CaptureDefaults& defaults, const Q
                 hyprcapture::ui::copyFileUrlToClipboard(state->outputPath);
             if (state->thumbnails) {
                 state->thumbnails->setTranscodeProgress(1.0);
-                state->thumbnails->setImagePixmap(recordingThumbnailPixmap(true));
-                state->thumbnails->finishTranscodeProgress(true, static_cast<int>(state->defaults.thumbnailTimeoutMs));
+                loadRecordingFirstFrame(state->outputPath, qApp, [state](const QPixmap& frame) {
+                    state->thumbnails->setImagePixmap(frame.isNull() ? recordingThumbnailPixmap(true) : frame);
+                    state->thumbnails->finishTranscodeProgress(true, static_cast<int>(state->defaults.thumbnailTimeoutMs));
+                });
             } else {
                 qApp->quit();
             }
@@ -626,6 +783,8 @@ int showRecordingTranscode(const hyprcapture::CaptureDefaults& defaults, const Q
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc > 1 && (std::string_view(argv[1]) == "--sound-meter" || std::string_view(argv[1]) == "--sound-list" || std::string_view(argv[1]) == "--sound-capture" || std::string_view(argv[1]) == "--sound-finalize"))
+        return hyprcapture::audio::runHelper(argc, argv);
     qputenv("QT_WAYLAND_SHELL_INTEGRATION", "layer-shell");
 #if LAYERSHELLQTINTERFACE_ENABLE_DEPRECATED_SINCE(6, 6)
     LayerShellQt::Shell::useLayerShell();
@@ -649,6 +808,7 @@ int main(int argc, char** argv) {
         {"thumbnail", "Show thumbnail.", "0|1", "1"},
         {"screenshot-notification", "Show a notification after a successful screenshot.", "0|1", "1"},
         {"include-cursor", "Include cursor.", "0|1", "0"},
+        {"remember-settings", "Restore previous interactive settings.", "0|1", "0"},
         {"confirm-before-capture", "Require explicit confirmation after target selection for normal open captures.", "0|1", "0"},
         {{"fushion-mode", "fusion-mode"}, "Enable fushion toolbar behavior.", "0|1", "0"},
         {"capture-fullscreen-clients-as-monitor", "Capture fullscreen clients as their monitor in window/fusion mode.", "0|1", "0"},
@@ -664,7 +824,15 @@ int main(int argc, char** argv) {
         {"record-filename-template", "Recording filename strftime template.", "template", "Recording-%Y-%m-%d-%H%M%S.mp4"},
         {"record-format", "Recording format.", "format", "mp4"},
         {"record-transparent-format", "Transparent window recording container format.", "format", "webm"},
-        {"record-codec", "Recording codec.", "codec", "libx264"},
+        {"record-audio-echo-cancellation", "Microphone AEC: -1 auto, 0 off, 1 on.", "policy", "-1"},
+        {"record-audio-echo-backend", "AEC backend: cpu or experimental npu.", "backend", "cpu"},
+        {"record-audio-mix", "Audio mixing preset.", "preset", "voice-priority"},
+        {"record-audio-system-gain", "System gain in dB.", "dB", "0"},
+        {"record-audio-mic-gain", "Mic gain in dB.", "dB", "0"},
+        {"record-audio", "Recording sound: off, system, microphone, mix.", "mode", "off"},
+        {"record-audio-output", "Sound source: auto, default, output device, or window:<address>.", "source", "auto"},
+        {"record-audio-input", "Microphone source.", "device", "default"},
+        {"record-codec", "Recording codec.", "codec", "auto"},
         {"record-transparent-codec", "Transparent window recording codec.", "codec", "auto"},
         {"record-solid-alpha", "Keep alpha outside follow-system/white/black window recording content when supported.", "0|1", "0"},
         {"record-preset", "Recording preset.", "preset", "veryfast"},
@@ -688,6 +856,7 @@ int main(int argc, char** argv) {
         {"thumbnail-target", "Path opened or deleted by a thumbnail preview.", "path"},
         {"record-countdown-request", "Show an input-transparent recording countdown for a private request file.", "path"},
         {"recording-result", "Handle a completed recording result.", "path"},
+        {"recording-pending-socket", "Watch recording finalization state.", "path"},
         {"recording-transcode-input", "Transcode an intermediate recording input.", "path"},
         {"recording-transcode-output", "Transcode output path.", "path"},
         {"recording-transcode-alpha", "Preserve alpha while transcoding.", "0|1", "0"},
@@ -731,6 +900,7 @@ int main(int argc, char** argv) {
     defaults.showThumbnail = flagValue(parser, "thumbnail", defaults.showThumbnail);
     defaults.screenshotNotification = flagValue(parser, "screenshot-notification", defaults.screenshotNotification);
     defaults.includeCursor = flagValue(parser, "include-cursor", defaults.includeCursor);
+    defaults.rememberSettings = flagValue(parser, "remember-settings", defaults.rememberSettings);
     defaults.confirmBeforeCapture = flagValue(parser, "confirm-before-capture", defaults.confirmBeforeCapture);
     defaults.fushionMode = flagValue(parser, "fushion-mode", defaults.fushionMode);
     defaults.captureFullscreenClientsAsMonitor =
@@ -748,6 +918,15 @@ int main(int argc, char** argv) {
     defaults.recordFilenameTemplate = parser.value("record-filename-template").toStdString();
     defaults.recordFormat = parser.value("record-format").toStdString();
     defaults.recordTransparentFormat = parser.value("record-transparent-format").toStdString();
+    defaults.recordAudioEchoCancellation = std::clamp(parser.value("record-audio-echo-cancellation").toInt(), -1, 1);
+    defaults.recordAudioEchoBackend = parser.value("record-audio-echo-backend") == "npu" ? "npu" : "cpu";
+    defaults.recordAudioMix = parser.value("record-audio-mix").toStdString();
+    if (defaults.recordAudioMix != "manual" && defaults.recordAudioMix != "auto-balance" && defaults.recordAudioMix != "voice-priority") defaults.recordAudioMix = "voice-priority";
+    defaults.recordAudioSystemGain = std::clamp(parser.value("record-audio-system-gain").toInt(), -61, 24);
+    defaults.recordAudioMicGain = std::clamp(parser.value("record-audio-mic-gain").toInt(), -61, 24);
+    defaults.recordAudio = hyprcapture::parseRecordAudio(parser.value("record-audio").toStdString());
+    defaults.recordAudioOutput = parser.value("record-audio-output").toStdString();
+    defaults.recordAudioInput = parser.value("record-audio-input").toStdString();
     defaults.recordCodec = parser.value("record-codec").toStdString();
     defaults.recordTransparentCodec = parser.value("record-transparent-codec").toStdString();
     defaults.recordSolidAlpha = flagValue(parser, "record-solid-alpha", defaults.recordSolidAlpha);
@@ -771,8 +950,9 @@ int main(int argc, char** argv) {
         const QString requestPath = parser.value("record-countdown-request");
         if (!hyprcapture::ui::isPrivateRuntimeFile(requestPath, MAX_RECORD_REQUEST_BYTES))
             return 1;
-        RecordingCountdownWindow countdown(requestPath, defaults.recordCountdownSeconds);
-        countdown.start();
+        RecordingCountdownController countdown(requestPath, defaults.recordCountdownSeconds);
+        if (!countdown.start())
+            return 1;
         return app.exec();
     }
 
@@ -783,8 +963,13 @@ int main(int argc, char** argv) {
                                       flagValue(parser, "recording-transcode-alpha", false),
                                       boundedInt(parser.value("recording-transcode-duration-ms"), 1, 1, 24 * 60 * 60 * 1000));
 
+    if (hasArgument(argc, argv, "--recording-pending-socket"))
+        return showRecordingPending(defaults, parser.value("recording-result"), parser.value("recording-pending-socket"));
+
     if (hasArgument(argc, argv, "--recording-result"))
         return showRecordingResult(defaults, parser.value("recording-result"));
+
+    cancelRecordingCountdown();
 
     QString sessionJson = parser.value("session-json");
     if (parser.isSet("session-json-file")) {

@@ -73,6 +73,7 @@ Json defaultsJson(const CaptureDefaults& defaults) {
         {"screenshotNotification", defaults.screenshotNotification},
         {"includeCursor", defaults.includeCursor},
         {"allowQuick", defaults.allowQuick},
+        {"rememberSettings", defaults.rememberSettings},
         {"confirmBeforeCapture", defaults.confirmBeforeCapture},
         {"fushionMode", defaults.fushionMode},
         {"captureFullscreenClientsAsMonitor", defaults.captureFullscreenClientsAsMonitor},
@@ -88,6 +89,14 @@ Json defaultsJson(const CaptureDefaults& defaults) {
         {"recordFilenameTemplate", boundedString(defaults.recordFilenameTemplate, MAX_METADATA_STRING_BYTES)},
         {"recordFormat", boundedString(defaults.recordFormat, MAX_METADATA_STRING_BYTES)},
         {"recordTransparentFormat", boundedString(defaults.recordTransparentFormat, MAX_METADATA_STRING_BYTES)},
+        {"recordAudio", toString(defaults.recordAudio)},
+        {"recordAudioEchoCancellation", defaults.recordAudioEchoCancellation},
+        {"recordAudioEchoBackend", defaults.recordAudioEchoBackend},
+        {"recordAudioMix", defaults.recordAudioMix},
+        {"recordAudioSystemGain", defaults.recordAudioSystemGain},
+        {"recordAudioMicGain", defaults.recordAudioMicGain},
+        {"recordAudioOutput", boundedString(defaults.recordAudioOutput, MAX_METADATA_STRING_BYTES)},
+        {"recordAudioInput", boundedString(defaults.recordAudioInput, MAX_METADATA_STRING_BYTES)},
         {"recordCodec", boundedString(defaults.recordCodec, MAX_METADATA_STRING_BYTES)},
         {"recordTransparentCodec", boundedString(defaults.recordTransparentCodec, MAX_METADATA_STRING_BYTES)},
         {"recordSolidAlpha", defaults.recordSolidAlpha},
@@ -233,6 +242,22 @@ bool parseDefaults(const Json& obj, CaptureDefaults& defaults) {
             return false;
         defaults.notificationBackend = parseNotificationBackend(value, defaults.notificationBackend);
     }
+    if (!stringValue(obj, "recordAudio", value, MAX_METADATA_STRING_BYTES, false))
+        return false;
+    if (obj.contains("recordAudio")) {
+        if (value != "off" && value != "system" && value != "microphone" && value != "mix")
+            return false;
+        defaults.recordAudio = parseRecordAudio(value);
+    }
+    if (obj.contains("recordAudioEchoCancellation") && obj["recordAudioEchoCancellation"].is_boolean())
+        defaults.recordAudioEchoCancellation = obj["recordAudioEchoCancellation"].get<bool>() ? 1 : 0;
+    else if (!int64Value(obj, "recordAudioEchoCancellation", defaults.recordAudioEchoCancellation, -1, 1, false)) return false;
+    if (!stringValue(obj, "recordAudioEchoBackend", defaults.recordAudioEchoBackend, MAX_METADATA_STRING_BYTES, false) ||
+        (defaults.recordAudioEchoBackend != "cpu" && defaults.recordAudioEchoBackend != "npu")) return false;
+    if (!stringValue(obj, "recordAudioMix", defaults.recordAudioMix, MAX_METADATA_STRING_BYTES, false) ||
+        (defaults.recordAudioMix != "manual" && defaults.recordAudioMix != "auto-balance" && defaults.recordAudioMix != "voice-priority") ||
+        !int64Value(obj, "recordAudioSystemGain", defaults.recordAudioSystemGain, -61, 24, false) ||
+        !int64Value(obj, "recordAudioMicGain", defaults.recordAudioMicGain, -61, 24, false)) return false;
     if (stringValue(obj, "recordWindowBackend", value, MAX_METADATA_STRING_BYTES, false))
         defaults.recordWindowBackend = parseRecordWindowBackend(value, defaults.recordWindowBackend);
     else
@@ -258,6 +283,7 @@ bool parseDefaults(const Json& obj, CaptureDefaults& defaults) {
     return boolValue(obj, "save", defaults.save, false) && boolValue(obj, "clipboard", defaults.clipboard, false) &&
         boolValue(obj, "showThumbnail", defaults.showThumbnail, false) && boolValue(obj, "includeCursor", defaults.includeCursor, false) &&
         boolValue(obj, "allowQuick", defaults.allowQuick, false) && boolValue(obj, "confirmBeforeCapture", defaults.confirmBeforeCapture, false) &&
+        boolValue(obj, "rememberSettings", defaults.rememberSettings, false) &&
         boolValue(obj, "fushionMode", defaults.fushionMode, false) &&
         boolValue(obj, "captureFullscreenClientsAsMonitor", defaults.captureFullscreenClientsAsMonitor, false) &&
         stringValue(obj, "fullscreenPreviewRounding", defaults.fullscreenPreviewRounding, MAX_METADATA_STRING_BYTES, false) &&
@@ -267,6 +293,8 @@ bool parseDefaults(const Json& obj, CaptureDefaults& defaults) {
         stringValue(obj, "recordFilenameTemplate", defaults.recordFilenameTemplate, MAX_METADATA_STRING_BYTES, false) &&
         stringValue(obj, "recordFormat", defaults.recordFormat, MAX_METADATA_STRING_BYTES, false) &&
         stringValue(obj, "recordTransparentFormat", defaults.recordTransparentFormat, MAX_METADATA_STRING_BYTES, false) &&
+        stringValue(obj, "recordAudioOutput", defaults.recordAudioOutput, MAX_METADATA_STRING_BYTES, false) &&
+        stringValue(obj, "recordAudioInput", defaults.recordAudioInput, MAX_METADATA_STRING_BYTES, false) &&
         stringValue(obj, "recordCodec", defaults.recordCodec, MAX_METADATA_STRING_BYTES, false) &&
         stringValue(obj, "recordTransparentCodec", defaults.recordTransparentCodec, MAX_METADATA_STRING_BYTES, false) &&
         boolValue(obj, "recordSolidAlpha", defaults.recordSolidAlpha, false) &&

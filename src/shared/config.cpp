@@ -188,8 +188,28 @@ WindowWheelScope parseWindowWheelScope(std::string_view value, WindowWheelScope 
     return fallback;
 }
 
+RecordAudio parseRecordAudio(std::string_view value, RecordAudio fallback) {
+    if (value == "off") return RecordAudio::Off;
+    if (value == "system") return RecordAudio::System;
+    if (value == "microphone") return RecordAudio::Microphone;
+    if (value == "mix") return RecordAudio::Mix;
+    return fallback;
+}
+
+std::string toString(RecordAudio value) {
+    switch (value) {
+        case RecordAudio::Off: return "off";
+        case RecordAudio::System: return "system";
+        case RecordAudio::Microphone: return "microphone";
+        case RecordAudio::Mix: return "mix";
+    }
+    return "off";
+}
+
 RecordWindowBackend parseRecordWindowBackend(std::string_view value, RecordWindowBackend fallback) {
     const auto v = normalized(value);
+    if (v == "auto" || v == "automatic")
+        return RecordWindowBackend::Auto;
     if (v == "compositor" || v == "hyprcapture" || v == "exact")
         return RecordWindowBackend::Compositor;
     if (v == "gsr-visible" || v == "visible-gsr" || v == "gsr" || v == "region")
@@ -309,10 +329,11 @@ std::string toString(WindowWheelScope value) {
 
 std::string toString(RecordWindowBackend value) {
     switch (value) {
+        case RecordWindowBackend::Auto: return "auto";
         case RecordWindowBackend::Compositor: return "compositor";
         case RecordWindowBackend::GsrVisible: return "gsr-visible";
     }
-    return "compositor";
+    return "auto";
 }
 
 std::string toString(NotificationBackend value) {

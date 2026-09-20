@@ -43,7 +43,13 @@ https://github.com/user-attachments/assets/2c986639-7a3d-44ee-9f33-1b9b79ad9f1d
 - nlohmann-json
 - Qt 6 Core, Gui, and Widgets
 - LayerShellQt `layer-shell-qt`
-- FFmpeg for recording output
+- libpipewire-0.3 development headers (`libpipewire` on Arch, `libpipewire-0.3-dev` on Debian/Ubuntu)
+- PipeWire development files, FFTW3 and FFmpeg libswresample/libavutil for the native DTLN-AEC candidate
+- Optional TensorFlow Lite 2.14.0 runtime (installed by `hyprcapture-install-aec`); OpenVINO is only needed for experimental NPU
+- libpulse development headers (`libpulse` on Arch, `libpulse-dev` on Debian/Ubuntu)
+- FFmpeg (including `ffprobe`, AAC and Opus encoders) for recording output
+- FFmpeg development libraries `libavformat`, `libavcodec`, and `libavutil` for timestamped RGBA transport (`ffmpeg` on Arch; `libavformat-dev libavcodec-dev libavutil-dev` on Debian/Ubuntu)
+- PulseAudio or PipeWire with its PulseAudio compatibility service for sound recording
 - `wl-clipboard` for persistent Wayland clipboard ownership
 
 ### Install with `hyprpm`
@@ -247,11 +253,11 @@ The response FIFO starts with `HYPRCAP_PIPE_V1`, a decimal JSON header length, t
 
 ### Recording
 
-Recording is toggled from the normal screenshot overlay toolbar. Click the record icon, choose an output format, then choose fullscreen, drag a region, or choose a window exactly like a screenshot. Fullscreen and region video recordings are handed to `gpu-screen-recorder`; GIF, APNG, WebP, and the default window backend use HyprCapture's compositor renderer. Window recordings also have an optional visible-region `gpu-screen-recorder` backend for normal video formats.
+Recording is toggled from the normal screenshot overlay toolbar. Click the record icon, choose an output format and backend, then choose fullscreen, drag a region, or choose a window exactly like a screenshot. The default `auto` backend uses HyprCapture's compositor renderer for windows and `gpu-screen-recorder` for fullscreen or region video. Virtual-output targets always use the compositor because GPU Screen Recorder cannot address them.
 
 To stop an active recording, open the same overlay and click the checked record icon.
 
-Current recording output is a single file under `record_save_dir`. Fullscreen and region video recordings require `gpu-screen-recorder` and avoid Hyprland's screencopy, portal, and screenshare session paths. GIF and animated WebP use FFmpeg rawvideo input from compositor RGBA readback for all capture modes. APNG records a hidden 60 fps MKV intermediate first, then the helper transcodes it to APNG while showing the thumbnail with progress when thumbnails are enabled. Animation formats require a fixed duration of 3, 5, 10, 15, or 30 seconds and default to 5 seconds. `record_window_backend = "gsr-visible"` records the selected on-screen window rectangle through `gpu-screen-recorder` for lower overhead on normal video formats, without portal or managed screenshare sessions, but it captures what is visibly present in that screen region. Finished recordings use the same `clipboard` and `show_thumbnail` settings as screenshots; clipboard output is a local file URI.
+Current recording output is a single file under `record_save_dir`. With `record_window_backend = "auto"`, normal fullscreen and region video use `gpu-screen-recorder`, while windows, virtual outputs, GIF, APNG, and WebP use compositor RGBA readback. Codec limits are checked against the scaled physical capture size: H.264 is used through 4096 pixels per axis, HEVC through 8192, and larger fullscreen canvases go directly to compositor recording. If the preferred backend fails during startup, HyprCapture tries the compatible alternate backend; a GSR process that exits without producing data also falls back to compositor recording. Transparent recordings and virtual outputs stay on compositor because GSR is not an equivalent fallback. Compositor FFmpeg exit status and output size are validated, and failed encodes are removed instead of being reported as completed zero-byte recordings. APNG records a hidden 60 fps MKV intermediate first, then the helper transcodes it to APNG while showing the thumbnail with progress when thumbnails are enabled. Animation formats require a fixed duration of 3, 5, 10, 15, or 30 seconds and default to 5 seconds. `gsr-visible` records a selected on-screen window rectangle with lower overhead, without portal or managed screenshare sessions, but captures what is visibly present in that region. Finished recordings use the same `clipboard` and `show_thumbnail` settings as screenshots; clipboard output is a local file URI.
 
 #### Recording state socket
 
@@ -310,6 +316,7 @@ hl.config({
             save = true,
             clipboard = true,
             show_thumbnail = true,
+            remember_settings = false,
             allow_quick = false,
             confirm_before_capture = false,
             fusion_mode = false,
@@ -328,12 +335,15 @@ hl.config({
             record_fps_options = "15 24 30 60",
             record_window_fps_limit = 12,
             record_window_real_bg_fps_limit = 8,
-            record_codec = "libx264",
+            record_audio = "off",
+            record_audio_output = "auto",
+            record_audio_input = "default",
+            record_codec = "auto",
             record_transparent_codec = "auto",
             record_solid_alpha = false,
             record_preset = "veryfast",
             record_gsr_flags = "",
-            record_window_backend = "compositor",
+            record_window_backend = "auto",
             record_max_seconds = 0,
             record_countdown_seconds = 0,
             include_cursor = false,
@@ -378,6 +388,7 @@ The old misspelled `fushion_mode` key is still accepted as a compatibility alias
 | `window_shadow` | string | `keep` | Window shadow policy. Supports `keep` and `remove`. Transparent window recordings keep shadows and normalize the alpha falloff so the shadow fades out instead of encoding as a hard border. |
 | `notification_backend` | string | `hyprland` | Backend for screenshot notifications plus non-error recording status and warnings. `hyprland` uses Hyprland's overlay; `system` uses the desktop notification service through `notify-send` (libnotify), includes the saved screenshot as its image/icon hint, and falls back to the Hyprland overlay when the command cannot be launched. Errors always use the Hyprland overlay so missing external notification infrastructure cannot hide failures. |
 | `include_cursor` | bool | `false` | Include the cursor visible when the capture session starts in fullscreen, region, and window screenshots. The interactive overlay cursor is not baked into the output. |
+| `remember_settings` | bool | `false` | Restore the last interactive mode, fullscreen scope, window background, recording format/codec/FPS/duration/backend and sound settings. Saves on capture or cancel (including Esc) to `$XDG_CONFIG_HOME/hyprcapture/last-settings.ini` (default `~/.config/hyprcapture/last-settings.ini`). Quick capture and the stop-recording UI bypass this state. The open/record dispatcher still determines screenshot versus recording. Saved choices override configured defaults while enabled; disabling this option uses the configured defaults again. |
 | `allow_quick` | bool | `false` | Enable no-confirmation `hl.plugin.hyprcapture.quick()` calls. Leave disabled unless your Hyprland IPC policy already restricts untrusted same-user clients. |
 | `confirm_before_capture` | bool | `false` | For `hl.plugin.hyprcapture.open()`, require an explicit confirmation after choosing a fullscreen, region, or window target. Region targets can be moved or resized; window targets can be switched before confirming. `quick()` and direct `record()` calls keep their existing no-extra-confirmation behavior. |
 | `fusion_mode` | bool | `false` | Fuse region and window interactions in one overlay: drag anywhere, including from the desktop background, to capture a region; single-click a window to capture that window; or single-click the background to capture the clicked monitor. The toolbar keeps the fullscreen action and configuration controls; fullscreen multi-monitor scope is shown only when multiple monitors are present. |
@@ -408,17 +419,47 @@ The old misspelled `fushion_mode` key is still accepted as a compatibility alias
 | `record_fps_options` | string | `15 24 30 60` | Whitespace, comma, or semicolon separated FPS choices shown in the overlay. The current `record_fps` value is added if it is not already listed. |
 | `record_window_fps_limit` | int | `12` | Safety cap for window recording with the current compositor-readback backend. Use `0` to disable the cap. |
 | `record_window_real_bg_fps_limit` | int | `8` | Additional safety cap for window recording with `window_background = "real"`. Use `0` to disable the cap. |
-| `record_codec` | string | `libx264` | Default recording codec shown in the overlay for normal video formats. Supports `auto`, `libx264`/`h264`, `h264_vaapi`, `libx265`/`h265`, `hevc_vaapi`/`h265_vaapi`, `libsvtav1`/`av1`, `av1_vaapi`, `libvpx-vp9`/`vp9`, `vp9_vaapi`, and `ffv1`. GIF, APNG, and WebP use fixed FFmpeg image-animation encoders. |
+| `record_audio` | string | `off` | Sound mode: `off`, `system`, `microphone`, or `mix`. Mix produces one audio track containing both sources. |
+| `record_audio_echo_cancellation` | int | `-1` | DTLN-AEC policy: `-1` automatic, `0` always off, `1` always on after correctness validation. Runtime overload protection applies to all modes. |
+| `record_audio_echo_backend` | string | `cpu` | `cpu` (default) or experimental `npu`, explicitly selected and independently validated. |
+| `record_audio_mix` | string | `voice-priority` | `manual`, `auto-balance`, or `voice-priority`. |
+| `record_audio_system_gain` | int | `0` | System gain in dB, −60 to +24; −61 mutes. |
+| `record_audio_mic_gain` | int | `0` | Microphone gain in dB, −60 to +24; −61 mutes. |
+| `record_audio_output` | string | `auto` | Auto follows the recording target: system default for fullscreen/region, target application for window recording. Also accepts `default`, a stable output name, or `window:<address>`. |
+| `record_audio_input` | string | `default` | Microphone source name or `default`. Monitor sources are excluded from the microphone picker. |
+| `record_codec` | string | `auto` | Default recording codec shown in the overlay for normal video formats. The UI exposes codec families only: `auto`, `h264`, `h265`, `av1`, `vp9`, and `ffv1`. For compositor recording, HyprCapture probes NVENC and VAAPI at the actual encoded resolution. `auto` prefers H.264 up to 4096 pixels per dimension and HEVC above that, trying both hardware codec families before falling back to software H.264. Explicit families retain their corresponding software fallback. Legacy implementation-specific values remain accepted and are folded into their codec family. GIF, APNG, and WebP use fixed FFmpeg image-animation encoders. |
 | `record_transparent_codec` | string | `auto` | Default recording codec shown when `window_background = "transparent"`. `auto` probes a tiny FFmpeg encode/decode sample and uses a hardware alpha encoder only when it actually preserves alpha; otherwise it falls back to CPU VP9/FFV1 and shows a warning. |
 | `record_solid_alpha` | bool | `false` | For window recordings with `window_background` set to `"follow-system"`, `"white"`, or `"black"`, keep alpha outside the window content when the selected format/codec supports transparency. This uses the same edge behavior as screenshot output and falls back to opaque recording when unsupported. |
 | `record_preset` | string | `veryfast` | FFmpeg preset used with `libx264`/`libx264rgb`. |
 | `record_gsr_flags` | string | empty | Extra default flags passed to `gpu-screen-recorder` for fullscreen and region recordings. `-w` and `-o` are rejected because HyprCapture owns the capture target and output path. If defaults conflict with overlay-controlled format, codec, FPS, cursor, target, or output settings, the overlay settings are appended later and take precedence. |
-| `record_window_backend` | string | `compositor` | Window recording backend. `compositor` preserves HyprCapture's offscreen window capture and background behavior. `gsr-visible` records the selected visible screen rectangle with `gpu-screen-recorder` for much lower overhead on normal video formats; occlusion/hidden-window capture and background replacement are not guaranteed. GIF, APNG, and WebP always use the compositor backend. |
+| `record_window_backend` | string | `auto` | Recording backend. `auto` uses compositor for windows and GSR for ordinary fullscreen/region video. `compositor` prefers compositor for every mode; `gsr-visible` prefers GSR, including a visible window region. Compatible startup failures try the other backend. Virtual outputs, transparent recordings, GIF, APNG, and WebP always use compositor. |
 | `record_max_seconds` | int | `0` | Optional automatic stop in seconds. `0` means no duration limit for normal video formats. GIF, APNG, and WebP require one of `3`, `5`, `10`, `15`, or `30` seconds in the overlay and fall back to `5` when configured otherwise. |
 | `record_countdown_seconds` | int | `0` | Optional countdown before recording starts. `0` disables it; values are clamped to 60 seconds. When enabled, HyprCapture closes the capture overlay, shows an input-transparent countdown window centered on the active screen, then starts recording. |
 | `thumbnail_timeout_ms` | int | `5000` | Thumbnail auto-close timeout in milliseconds. Use `0` to keep it open until user action. |
 | `thumbnail_monitor` | string | `active` | Monitor used for result thumbnails. Supports `active`, `primary`, `all`, or a case-insensitive output name such as `DP-2`. `active` is resolved from Hyprland's pointer position before the helper starts. `all` shows one synchronized thumbnail per monitor; swipe progress and swipe-to-close/delete animations are shared, while right-click menus remain independent. Unknown names fall back to the active monitor. |
 | `helper` | string | empty | Optional absolute helper override. By default the plugin tries `HYPRCAPTURE_HELPER`, then `$HOME/.local/bin/hyprcapture-ui`, then trusted system install paths. |
+
+### Recording sound
+
+The recording toolbar has a third **Sound** row. Choose **Off**, **System**, **Microphone**, or **Mix**, then select the sound source and/or microphone. The **Source** menu includes **Auto** (default), **System default**, output devices, and current windows. Auto captures the system default output for fullscreen/region recording and the target window application for window recording. Device menus refresh when opened and include **System default**. Defaults are resolved when recording starts and remain fixed for that recording. GIF, APNG, and WebP do not carry audio; their Sound controls are disabled without forgetting your video settings.
+
+Both recording backends use a separate headless helper process for sound. Mix outputs a single stereo track. Choose **Manual**, **Auto balance**, or **Voice priority** (default) in the Sound row. Auto balance applies a microphone high-pass filter, gentle noise gate and bounded speech normalization, plus system-sound compression and attenuation. Voice priority also ducks system sound when the processed microphone level rises; this is level-based ducking, not speech recognition.
+
+Manual shows a fourth row with separate **Sound** and **Mic** gain sliders (−60 to +24 dB, plus Mute), post-gain sample-peak/RMS meters in dBFS, a 1.2-second peak hold and clipping indication. The preview always samples both selected sources independently of the recording Sound mode (including Off), without playback or PCM storage, and stops when the manual panel closes. Sound mode controls only which channels are included in the recording. Gain changes affect the recording, not desktop playback volume. Each meter represents its channel before summing and the final limiter; the sum can exceed 0 dBFS even when the individual channels do not. Both channels feed a final limiter. Settings are chosen before recording; the panel is not a live recording mixer. Gain settings also apply after processing in automatic presets.
+
+The **AEC** row is available in all mixing presets. This candidate uses **Auto / Always on / Always off**, a **CPU / NPU*** selector, a result label and **Retest**. Automatic mode selects 512 before 256 only when both ten-second complete-chain trials achieve at least 3× real time and P99 ≤ 4 ms. Unavailable, busy or untested machines use the raw microphone while testing remains pending. Always on still requires valid output and retains overload protection; it may use a correctly validated 256 model that missed the automatic speed threshold. No 128 model is offered.
+
+An independent native C++ worker runs TensorFlow Lite 2.14.0 / XNNPACK on one CPU thread. The optional OpenVINO module explicitly targets NPU and validates its recurrent states against fixed references. PipeWire's echo-cancel module supplies the playback reference, synchronization and clock compensation through the custom DTLN SPA adapter. The microphone is processed as 16 kHz mono and restored to 48 kHz (approximately 8 kHz microphone bandwidth). System sound is untouched by the model. Preview and recording use the same worker path. Worker failure or a queue over 100 ms for one second restores the original microphone and reports that state. A recording does not change models or retry AEC after fallback.
+
+`hyprpm` installs the native components and runs the optional AEC installer after normal tests. Standard installs provide `hyprcapture-install-aec /path/to/bin`; this downloads checksum-pinned sources and builds the CPU runtime when missing, then downloads and verifies models and checks the machine. Initial source compilation can take several minutes and needs a C/C++ compiler, make, curl, tar and flock. `hyprcapture-aec --install` retries model installation and testing; `--check --force` retests without downloading. Add `--npu` only for the experimental backend. Failure does not disable ordinary capture. Nix uses fixed source/model hashes and checks the actual machine on first UI launch.
+
+Performance results live in the user cache, bound to hashed machine identity, CPU features, available cores, backend/driver and component hashes. Explicit choices live separately in `hyprcapture/aec.ini` under the user config directory; they survive machine migration. Old ambiguous remembered booleans become Auto; explicit `0`/`1` configuration keeps its meaning. Test input is a redistributable synthetic signal and never opens the microphone or speakers. See [AEC assets](resources/aec/README.md). This remains a release candidate until the real recording, speech-quality and long-duration acceptance gates pass.
+
+If a device is missing or disconnects, HyprCapture reports the error and keeps recording video; the failed source becomes silent while another source continues. Output devices and microphones are not automatically switched or reconnected during a recording. Window sources follow playback streams from the selected application process and its children, including streams created after recording starts; unrelated applications on the same output are excluded. Window capture waits silently when that application is not playing audio and never falls back to desktop audio. Applications that share one process/audio service across multiple windows (for example, browsers) cannot always be isolated per window. Matching uses process identity, not window title or application name. The source menu refreshes when opened; a closed window selection remains marked unavailable.
+
+Stopping displays **Merging sound** while FFmpeg copies the video stream and adds AAC (MP4/MOV) or Opus (WebM/MKV). The video is not reencoded. Temporary float PCM files are stored with private permissions in a `.hyprcapture-sound-*` directory next to the video (about 23 MB per minute per source). Successful merging removes these files. A failed merge preserves the original video and recoverable audio, and the error gives the recovery directory. Do not remove it until you have recovered any sound you need.
+
+GSR sound synchronization requires `gpu-screen-recorder` with `-write-first-frame-ts` support. Sound-enabled requests reject conflicting `record_gsr_flags` options (`-a`, `-ac`, `-ab`, `-ffmpeg-audio-opts`, `-ffmpeg-opts`, `-write-first-frame-ts`); use the Sound row instead. With Sound off, existing custom audio flags retain their behavior.
 
 For 60 fps, prefer hardware encoding:
 
@@ -433,7 +474,9 @@ hl.config({
 })
 ```
 
-`auto` currently prefers VAAPI when a writable `/dev/dri/renderD*` device exists and falls back to `libx264` for the window-recording FFmpeg backend. For alpha-preserving window recordings, use `webm`/VP9, `mkv`/FFV1, APNG, or WebP; `mp4` is blocked by the overlay when `window_background = "transparent"`. MOV/HEVC alpha exists in Apple's ecosystem, but this Linux FFmpeg path does not currently encode that alpha profile, so transparent MOV is also blocked. WebP animation uses `libwebp_anim` in lossy mode at quality 75.
+`auto` prefers H.264 for canvases up to 4096 pixels in both dimensions and HEVC for larger compositor recordings. For example, a 5204×3356 window tries HEVC NVENC/VAAPI first. All hardware candidates are probed at the actual output dimensions; if the preferred family fails, the other hardware family is tried before software H.264. Selecting `h264` or `h265` explicitly keeps that codec family, including its software fallback. For alpha-preserving window recordings, use `webm`/VP9, `mkv`/FFV1, APNG, or WebP; `mp4` is blocked by the overlay when `window_background = "transparent"`. MOV/HEVC alpha exists in Apple's ecosystem, but this Linux FFmpeg path does not currently encode that alpha profile, so transparent MOV is also blocked. WebP animation uses `libwebp_anim` in lossy mode at quality 75.
+
+Normal compositor video recordings carry the captured frame’s monotonic timestamp through a NUT RGBA stream to FFmpeg. A slow encoder skips capture opportunities instead of accumulating repeated frames; elapsed time remains correct and audio uses the same first-frame clock. At stop, at most one terminal sample holds the last picture through the recording end. GIF, APNG intermediates, and WebP retain their existing animation timing.
 
 The compositor recording path uses synchronous compositor readback. To avoid making Hyprland sluggish, window recordings are capped by `record_window_fps_limit` until the GPU-only encoder path lands. GIF, APNG, and WebP use the same compositor path for fullscreen and region captures, so keep area and FPS modest. For visible on-screen windows where 60 fps matters more than offscreen/occlusion-safe capture, set `record_window_backend = "gsr-visible"` and use a normal video format.
 
@@ -465,3 +508,7 @@ Temporary compositor artifacts and thumbnail/clipboard scratch files are written
 - `window_background = "real"` uses compositor-captured real background data when available and falls back to reconstructing from the frozen desktop snapshot.
 - Recording applies window decoration cropping and solid/follow-system backgrounds in the compositor-side path. Since plugin-side recording cannot query the helper's Qt palette, `window_background = "follow-system"` uses the same light fallback color as the screenshot helper. `record_solid_alpha = true` lets follow-system/white/black window recordings keep transparent pixels outside the window content when the selected format/codec supports alpha. `window_background = "real"` uses live compositor background data for window recordings and is treated as opaque for recording-format validation. Transparent output requires an alpha-capable format such as `webm`/VP9 or `mkv`/FFV1; MP4/MOV H.264/H.265 output is intentionally rejected for transparent recordings.
 - Do not run `hyprpm update` or reload the plugin while an active screenshot overlay is being used.
+
+To verify application audio isolation against a running PipeWire server, run `python3 tests/audio_application_live_test.py build-codex/hyprcapture-ui`. This creates private test outputs without changing the default output, and checks multiple streams, subprocess matching, late playback and live metering.
+
+AEC integration test: `python3 tests/audio_echo_live_test.py build-codex/hyprcapture-ui` uses private synthetic playback/microphone nodes to check echo suppression, double talk, unmodified defaults and node cleanup.

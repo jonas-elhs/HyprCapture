@@ -1,11 +1,22 @@
+#include <QScrollArea>
+#include <QSlider>
+#include <QCheckBox>
+#include "ui/audio_meter.hpp"
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QCoreApplication>
 #include "ui/capture_overlay.hpp"
 
 #include "ui/clipboard_utils.hpp"
 #include "ui/overlay_paint.hpp"
+#include "ui/remembered_settings.hpp"
+#include "audio/aec_policy.hpp"
 #include "ui/result_thumbnail.hpp"
 #include "ui/screenshot_notification.hpp"
 #include "ui/watermark.hpp"
 #include "shared/protocol.hpp"
+#include "shared/audio_source.hpp"
 
 #include <LayerShellQt/Window>
 
@@ -66,6 +77,11 @@ class InlineSelect final : public QWidget {
 
     void addItems(const QStringList& items);
     void setPrefix(const QString& prefix);
+    void setLabels(const std::map<QString, QString>& labels) { m_labels = labels; addItems(m_items); setCurrentText(m_current); }
+    void setOnOpening(std::function<void()> callback) { m_onOpening = std::move(callback); }
+    void setCompactWidth(int width) { if (m_compactWidth == width) return; m_compactWidth = width; addItems(m_items); setCurrentText(m_current); }
+
+    void setSelectionHint(const QString& hint) { if (m_hint == hint) return; m_hint = hint; setCurrentText(m_current); }
     void setOnChanged(std::function<void()> onChanged);
     void setCurrentText(const QString& text);
     QString currentText() const;
@@ -77,6 +93,7 @@ class InlineSelect final : public QWidget {
     QString buttonText(const QString& text) const;
     void updateButtonIcon();
     void showPopup();
+    void positionPopup();
     void choose(const QString& text);
 
     QWidget*     m_popupParent = nullptr;
@@ -87,6 +104,11 @@ class InlineSelect final : public QWidget {
     QStringList  m_items;
     QString      m_current;
     QString      m_prefix;
+    QString      m_hint;
+    std::map<QString, QString> m_labels;
+    std::function<void()> m_onOpening;
+    int m_compactWidth = 0;
+
     std::function<void()> m_onChanged;
 };
 
@@ -237,22 +259,16 @@ QStringList recordFpsChoices(const hyprcapture::CaptureDefaults& defaults) {
 
 QString codecChoiceFromConfig(const std::string& codec) {
     const QString value = normalizedChoice(qString(codec));
-    if (value == "libx264" || value == "h264")
+    if (value == "libx264" || value == "h264" || value == "h264-vaapi" || value == "h264-nvenc")
         return QStringLiteral("h264");
-    if (value == "h264-vaapi")
-        return QStringLiteral("h264-vaapi");
-    if (value == "libx265" || value == "h265" || value == "hevc")
+    if (value == "libx265" || value == "h265" || value == "hevc" || value == "hevc-vaapi" || value == "h265-vaapi" ||
+        value == "hevc-nvenc" || value == "h265-nvenc")
         return QStringLiteral("h265");
-    if (value == "hevc-vaapi" || value == "h265-vaapi")
-        return QStringLiteral("h265-vaapi");
-    if (value == "libsvtav1" || value == "libaom-av1" || value == "librav1e" || value == "av1")
+    if (value == "libsvtav1" || value == "libaom-av1" || value == "librav1e" || value == "av1" || value == "av1-vaapi" ||
+        value == "av1-nvenc")
         return QStringLiteral("av1");
-    if (value == "av1-vaapi")
-        return QStringLiteral("av1-vaapi");
-    if (value == "libvpx-vp9" || value == "vp9")
+    if (value == "libvpx-vp9" || value == "vp9" || value == "vp9-vaapi")
         return QStringLiteral("vp9");
-    if (value == "vp9-vaapi")
-        return QStringLiteral("vp9-vaapi");
     if (value == "ffv1")
         return QStringLiteral("ffv1");
     return QStringLiteral("auto");
@@ -267,21 +283,13 @@ QString defaultRecordCodecForBackground(const hyprcapture::CaptureDefaults& defa
 QString codecConfigFromChoice(const QString& choice) {
     const QString value = normalizedChoice(choice);
     if (value == "h264")
-        return QStringLiteral("libx264");
-    if (value == "h264-vaapi")
-        return QStringLiteral("h264_vaapi");
+        return QStringLiteral("h264");
     if (value == "h265")
-        return QStringLiteral("libx265");
-    if (value == "h265-vaapi")
-        return QStringLiteral("hevc_vaapi");
+        return QStringLiteral("h265");
     if (value == "av1")
-        return QStringLiteral("libsvtav1");
-    if (value == "av1-vaapi")
-        return QStringLiteral("av1_vaapi");
+        return QStringLiteral("av1");
     if (value == "vp9")
-        return QStringLiteral("libvpx-vp9");
-    if (value == "vp9-vaapi")
-        return QStringLiteral("vp9_vaapi");
+        return QStringLiteral("vp9");
     if (value == "ffv1")
         return QStringLiteral("ffv1");
     return QStringLiteral("auto");
@@ -435,12 +443,6 @@ bool alphaProbeSucceeded(const QString& format, const QString& codecChoice) {
     const bool preservesAlpha = encoded && (normalizedFormat == "webm" ? webmHasAlphaMode(outputPath) : decodedFrameHasAlpha(outputPath));
     cache[key] = preservesAlpha;
     return preservesAlpha;
-}
-
-bool isHardwareAlphaCandidate(const QString& codecChoice) {
-    const QString codec = normalizedChoice(codecChoice);
-    return codec.endsWith(QStringLiteral("-vaapi")) || codec.endsWith(QStringLiteral("-qsv")) || codec.endsWith(QStringLiteral("-nvenc")) ||
-        codec.endsWith(QStringLiteral("-vulkan")) || codec.endsWith(QStringLiteral("-amf"));
 }
 
 TransparentAutoChoice transparentAutoChoiceForFormat(QString format) {
@@ -1294,7 +1296,16 @@ InlineSelect::InlineSelect(QWidget* popupParent, QWidget* parent) : QWidget(pare
     m_panel->setStyleSheet(popupStyleSheet(QApplication::palette()));
     m_panel->hide();
 
-    m_panelLayout = new QVBoxLayout(m_panel);
+    auto* panelLayout = new QVBoxLayout(m_panel);
+    panelLayout->setContentsMargins(0, 0, 0, 0);
+    auto* scroll = new QScrollArea(m_panel);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidgetResizable(true);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto* content = new QWidget(scroll);
+    scroll->setWidget(content);
+    panelLayout->addWidget(scroll);
+    m_panelLayout = new QVBoxLayout(content);
     m_panelLayout->setContentsMargins(5, 5, 5, 5);
     m_panelLayout->setSpacing(2);
     updateButtonIcon();
@@ -1308,22 +1319,34 @@ void InlineSelect::addItems(const QStringList& items) {
     }
 
     for (const auto& item : m_items) {
-        auto* button = new QPushButton(item, m_panel);
+        const auto found = m_labels.find(item);
+        const auto label = found == m_labels.end() ? item : found->second;
+        auto* button = new QPushButton(m_button->fontMetrics().elidedText(label, Qt::ElideRight, 380), m_panelLayout->parentWidget());
+        button->setToolTip(label);
+        button->setProperty("value", item);
         button->setCheckable(true);
         connect(button, &QPushButton::clicked, this, [this, item] { choose(item); });
         m_panelLayout->addWidget(button);
+        // A live refresh must make new items participate in sizeHint now,
+        // before the popup is sized; Qt otherwise defers their visibility.
+        button->show();
     }
+    m_panelLayout->invalidate();
+    m_panelLayout->activate();
 
     int width = 0;
     const auto metrics = m_button->fontMetrics();
     for (const auto& item : m_items)
         width = std::max(width, metrics.horizontalAdvance(buttonText(item)) + 42);
-    m_buttonWidth = width;
+    m_buttonWidth = m_compactWidth > 0 ? std::min(width, m_compactWidth) : width;
     m_button->setMinimumWidth(m_buttonWidth);
-    m_panel->setMinimumWidth(width);
+    m_button->setMaximumWidth(m_compactWidth > 0 ? m_compactWidth : QWIDGETSIZE_MAX);
+    m_panel->setMinimumWidth(std::min(width, 440));
 
     if (m_current.isEmpty() && !m_items.isEmpty())
         setCurrentText(m_items.first());
+    else setCurrentText(m_current);
+    if (isPopupVisible()) positionPopup();
 }
 
 void InlineSelect::setPrefix(const QString& prefix) {
@@ -1338,9 +1361,11 @@ void InlineSelect::setOnChanged(std::function<void()> onChanged) {
 
 void InlineSelect::setCurrentText(const QString& text) {
     m_current = text;
-    m_button->setText(buttonText(text));
+    const auto fullText = buttonText(text);
+    m_button->setToolTip(fullText + (m_hint.isEmpty() ? QString{} : "\n" + m_hint));
+    m_button->setText(m_compactWidth > 0 ? m_button->fontMetrics().elidedText(fullText, Qt::ElideRight, std::max(30, m_compactWidth - 42)) : fullText);
     for (auto* button : m_panel->findChildren<QPushButton*>())
-        button->setChecked(button->text() == text);
+        button->setChecked(button->property("value").toString() == text);
 }
 
 QString InlineSelect::currentText() const {
@@ -1384,9 +1409,10 @@ bool InlineSelect::isPopupVisible() const {
 }
 
 QString InlineSelect::buttonText(const QString& text) const {
-    if (m_prefix.isEmpty())
-        return text;
-    return m_prefix + QStringLiteral(": ") + text;
+    const auto found = m_labels.find(text);
+    const auto label = found == m_labels.end() ? text : found->second;
+    if (m_prefix.isEmpty()) return label;
+    return m_prefix + QStringLiteral(": ") + label;
 }
 
 void InlineSelect::updateButtonIcon() {
@@ -1396,16 +1422,22 @@ void InlineSelect::updateButtonIcon() {
     m_button->setIcon(iconFromSvg(kSelectArrowSvg, kSelectArrowIconSize, rotationDegrees));
 }
 
-void InlineSelect::showPopup() {
-    if (g_openSelect && g_openSelect != this)
-        g_openSelect->hidePopup();
-    m_panel->adjustSize();
+void InlineSelect::positionPopup() {
+    m_panel->setFixedSize(std::min(std::max(160, m_panel->minimumWidth()), std::max(1, m_popupParent->width() - 16)),
+                          std::min(std::max(40, m_panelLayout->sizeHint().height() + 4), std::min(360, std::max(1, m_popupParent->height() - 16))));
     QPoint pos = mapTo(m_popupParent, QPoint(0, height() + 5));
     if (pos.x() + m_panel->width() > m_popupParent->width() - 8)
         pos.setX(std::max(8, m_popupParent->width() - m_panel->width() - 8));
     if (pos.y() + m_panel->height() > m_popupParent->height() - 8)
         pos.setY(std::max(8, mapTo(m_popupParent, QPoint(0, 0)).y() - m_panel->height() - 5));
     m_panel->move(pos);
+}
+
+void InlineSelect::showPopup() {
+    if (m_onOpening) m_onOpening();
+    if (g_openSelect && g_openSelect != this)
+        g_openSelect->hidePopup();
+    positionPopup();
     m_panel->raise();
     m_panel->show();
     m_button->setChecked(true);
@@ -1427,6 +1459,12 @@ CaptureOverlay::CaptureOverlay(hyprcapture::CaptureDefaults defaults, bool quick
     QElapsedTimer parseTimer;
     parseTimer.start();
     parseSessionJson(sessionJson);
+    hyprcapture::ui::restoreAecPreferences(m_defaults);
+    if (!m_quick && !m_recordActive && hyprcapture::ui::restoreSettings(m_defaults)) {
+        m_mode = m_defaults.mode;
+        m_recordFormatAuto = false;
+        m_recordCodecAuto = false;
+    }
     m_confirmBeforeCapture = m_defaults.confirmBeforeCapture && !m_quick && !m_record && !m_recordActive;
     beginHymissionCaptureInputSuppression();
     traceTiming(QStringLiteral("parse_session"), parseTimer.elapsed());
@@ -1479,6 +1517,7 @@ void CaptureOverlay::initializeOverlay(const QRect& overlayGeometry) {
     QElapsedTimer toolbarTimer;
     toolbarTimer.start();
     buildToolbar();
+    connect(this, &CaptureOverlay::finishingStarted, this, &CaptureOverlay::saveRememberedSettings);
     traceTiming(QStringLiteral("build_toolbar"), toolbarTimer.elapsed());
 
     winId();
@@ -1501,7 +1540,36 @@ void CaptureOverlay::initializeOverlay(const QRect& overlayGeometry) {
         m_toolbar->setVisible(m_overlayActive);
 }
 
+void CaptureOverlay::saveRememberedSettings() {
+    if (!m_defaults.rememberSettings || m_quick || m_recordActive)
+        return;
+    auto snapshot = m_defaults;
+    snapshot.mode = m_mode;
+    snapshot.fullscreenScope = currentFullscreenScope();
+    snapshot.windowBackground = currentWindowBackground();
+    snapshot.recordFps = currentRecordFps();
+    snapshot.recordMaxSeconds = currentRecordMaxSeconds();
+    snapshot.recordWindowBackend = currentRecordBackend();
+    if (m_record) {
+        if (currentRecordBackground() == hyprcapture::WindowBackground::Transparent) {
+            snapshot.recordTransparentFormat = currentRecordFormat().toStdString();
+            snapshot.recordTransparentCodec = currentRecordCodec().toStdString();
+        } else {
+            snapshot.recordFormat = currentRecordFormat().toStdString();
+            snapshot.recordCodec = currentRecordCodec().toStdString();
+        }
+    }
+    if (m_systemGain) snapshot.recordAudioSystemGain = m_systemGain->value();
+    if (m_micGain) snapshot.recordAudioMicGain = m_micGain->value();
+    if (!hyprcapture::ui::saveSettings(snapshot))
+        qWarning("HyprCapture: could not save remembered settings");
+}
+
 CaptureOverlay::~CaptureOverlay() {
+    // QProcess destruction may emit finished after the toolbar children are gone.
+    for (auto* process : findChildren<QProcess*>())
+        process->disconnect(this);
+    if (m_meterProcess) { m_meterProcess->disconnect(this); m_meterProcess->kill(); m_meterProcess->waitForFinished(1000); }
     endHymissionCaptureInputSuppression();
 }
 
@@ -1549,6 +1617,23 @@ void CaptureOverlay::adoptInteractionState(const CaptureOverlay& source) {
     m_recordError = source.m_recordError;
     m_recordFormatAuto = source.m_recordFormatAuto;
     m_recordCodecAuto = source.m_recordCodecAuto;
+    m_defaults.recordAudioEchoCancellation = source.m_defaults.recordAudioEchoCancellation;
+    m_defaults.recordAudioEchoBackend = source.m_defaults.recordAudioEchoBackend;
+    if (m_echoCancellation) m_echoCancellation->setCurrentText(QString::number(m_defaults.recordAudioEchoCancellation));
+    if (m_echoBackend) m_echoBackend->setCurrentText(qString(m_defaults.recordAudioEchoBackend));
+    m_defaults.recordAudioMix = source.m_defaults.recordAudioMix;
+    m_defaults.recordAudioSystemGain = source.m_defaults.recordAudioSystemGain;
+    m_defaults.recordAudioMicGain = source.m_defaults.recordAudioMicGain;
+    if (m_soundPreset) m_soundPreset->setCurrentText(qString(m_defaults.recordAudioMix));
+    if (m_systemGain) m_systemGain->setValue(m_defaults.recordAudioSystemGain);
+    if (m_micGain) m_micGain->setValue(m_defaults.recordAudioMicGain);
+    m_defaults.recordAudio = source.m_defaults.recordAudio;
+    m_defaults.recordAudioOutput = source.m_defaults.recordAudioOutput;
+    m_defaults.recordAudioInput = source.m_defaults.recordAudioInput;
+    if (m_soundMode) m_soundMode->setCurrentText(qString(hyprcapture::toString(m_defaults.recordAudio)));
+    if (m_soundOutput) m_soundOutput->setCurrentText(qString(m_defaults.recordAudioOutput));
+    if (m_soundInput) m_soundInput->setCurrentText(qString(m_defaults.recordAudioInput));
+
     if (m_recordToggle)
         m_recordToggle->setChecked(m_record);
     if (m_fullscreenScope)
@@ -1793,7 +1878,9 @@ void CaptureOverlay::buildToolbar() {
     auto* rootLayout = new QVBoxLayout(m_toolbar);
     rootLayout->setContentsMargins(10, 7, 10, 7);
     rootLayout->setSpacing(5);
-    rootLayout->setSizeConstraint(QLayout::SetFixedSize);
+    // relayoutToolbar() owns the screen-width clamp; asynchronous label changes
+    // must not reset the toolbar to its unconstrained size hint.
+    rootLayout->setSizeConstraint(QLayout::SetNoConstraint);
 
     auto* layout = new QHBoxLayout();
     layout->setContentsMargins(0, 0, 0, 0);
@@ -1926,7 +2013,7 @@ void CaptureOverlay::buildToolbar() {
 
     m_recordCodec = new InlineSelect(this, m_recordOptions);
     m_recordCodec->setPrefix("Codec");
-    m_recordCodec->addItems(QStringList{"auto", "h264", "h264-vaapi", "h265", "h265-vaapi", "av1", "av1-vaapi", "vp9", "vp9-vaapi", "ffv1"});
+    m_recordCodec->addItems(QStringList{"auto", "h264", "h265", "av1", "vp9", "ffv1"});
     m_recordCodec->setCurrentText(defaultRecordCodecForBackground(m_defaults, currentRecordBackground()));
     m_recordCodec->setOnChanged([this, onRecordOptionChanged] {
         m_recordCodecAuto = false;
@@ -1935,6 +2022,7 @@ void CaptureOverlay::buildToolbar() {
     recordLayout->addWidget(m_recordCodec);
 
     m_recordFormat = new InlineSelect(this, m_recordOptions);
+    m_recordFormat->setObjectName("recordFormat");
     m_recordFormat->setPrefix("Format");
     m_recordFormat->addItems(QStringList{"mp4", "mov", "webm", "mkv", "gif", "apng", "webp"});
     m_recordFormat->setCurrentText(defaultRecordFormatForBackground(m_defaults, currentRecordBackground()));
@@ -1970,12 +2058,126 @@ void CaptureOverlay::buildToolbar() {
 
     m_recordBackend = new InlineSelect(this, m_recordOptions);
     m_recordBackend->setPrefix("Backend");
-    m_recordBackend->addItems(QStringList{"compositor", "gsr-visible"});
+    m_recordBackend->addItems(QStringList{"auto", "compositor", "gsr-visible"});
     m_recordBackend->setCurrentText(qString(hyprcapture::toString(m_defaults.recordWindowBackend)));
     m_recordBackend->setOnChanged(onRecordOptionChanged);
     recordLayout->addWidget(m_recordBackend);
 
-    rootLayout->addWidget(m_recordOptions);
+    rootLayout->addWidget(m_recordOptions, 0, Qt::AlignHCenter);
+
+    m_soundOptions = new QWidget(m_toolbar);
+    m_soundOptions->setObjectName("soundOptions");
+    auto* soundLayout = new QHBoxLayout(m_soundOptions);
+    soundLayout->setContentsMargins(0, 0, 0, 0);
+    soundLayout->setSpacing(5);
+    m_soundMode = new InlineSelect(this, m_soundOptions);
+    m_soundMode->setObjectName("soundMode");
+    m_soundMode->setPrefix("Sound");
+    m_soundMode->addItems({"off", "system", "microphone", "mix"});
+    m_soundMode->setLabels({{"off", "Off"}, {"system", "System"}, {"microphone", "Microphone"}, {"mix", "Mix"}});
+    m_soundMode->setCurrentText(qString(hyprcapture::toString(m_defaults.recordAudio)));
+    m_soundMode->setOnChanged([this, onRecordOptionChanged] {
+        m_defaults.recordAudio = hyprcapture::parseRecordAudio(m_soundMode->currentText().toStdString());
+        onRecordOptionChanged();
+    });
+    soundLayout->addWidget(m_soundMode);
+    m_soundOutput = new InlineSelect(this, m_soundOptions);
+    m_soundOutput->setObjectName("soundOutput");
+    m_soundInput = new InlineSelect(this, m_soundOptions);
+    m_soundInput->setObjectName("soundInput");
+    m_soundOutput->setPrefix("Source");
+    m_soundInput->setPrefix("Mic");
+    for (auto* select : {m_soundOutput, m_soundInput}) {
+        select->setCompactWidth(210);
+        select->addItems({"default"});
+        select->setLabels({{"default", "System default"}});
+        select->setOnOpening([this] { refreshSoundDevices(); });
+        soundLayout->addWidget(select);
+    }
+    m_soundOutput->addItems({"auto", "default"});
+    m_soundOutput->setLabels({{"auto", "Auto"}, {"default", "System default"}});
+    m_soundOutput->setCurrentText(qString(m_defaults.recordAudioOutput));
+    m_soundInput->setCurrentText(qString(m_defaults.recordAudioInput));
+    m_soundOutput->setOnChanged([this, onRecordOptionChanged] {
+        m_defaults.recordAudioOutput = m_soundOutput->currentText().toStdString(); onRecordOptionChanged();
+    });
+    m_soundInput->setOnChanged([this, onRecordOptionChanged] {
+        m_defaults.recordAudioInput = m_soundInput->currentText().toStdString(); onRecordOptionChanged();
+    });
+    m_soundPreset = new InlineSelect(this, m_soundOptions);
+    m_soundPreset->setObjectName("soundPreset");
+    m_soundPreset->addItems({"manual", "auto-balance", "voice-priority"});
+    m_soundPreset->setLabels({{"manual", "Manual"}, {"auto-balance", "Auto balance"}, {"voice-priority", "Voice priority"}});
+    m_soundPreset->setCurrentText(qString(m_defaults.recordAudioMix));
+    m_soundPreset->setOnChanged([this, onRecordOptionChanged] {
+        m_defaults.recordAudioMix = m_soundPreset->currentText().toStdString(); onRecordOptionChanged();
+    });
+    soundLayout->addWidget(m_soundPreset);
+    rootLayout->addWidget(m_soundOptions);
+    m_aecOptions = new QWidget(m_toolbar);
+    m_aecOptions->setObjectName("aecOptions");
+    auto* aecLayout = new QHBoxLayout(m_aecOptions);
+    aecLayout->setContentsMargins(0,0,0,0); aecLayout->setSpacing(4);
+    aecLayout->addStretch();
+    m_echoCancellation = new InlineSelect(this, m_aecOptions);
+    m_echoCancellation->setObjectName("echoCancellation");
+    m_echoCancellation->setPrefix("AEC"); m_echoCancellation->setCompactWidth(110);
+    m_echoCancellation->addItems({"-1","1","0"});
+    m_echoCancellation->setLabels({{"-1","Auto"},{"1","Always on"},{"0","Always off"}});
+    m_echoCancellation->setCurrentText(QString::number(m_defaults.recordAudioEchoCancellation));
+    m_echoCancellation->setOnChanged([this] {
+        m_defaults.recordAudioEchoCancellation = m_echoCancellation->currentText().toInt();
+        hyprcapture::ui::saveAecPreferences(m_defaults); refreshAecStatus(); updateSoundMeter();
+    });
+    aecLayout->addWidget(m_echoCancellation);
+    m_echoBackend = new InlineSelect(this,m_aecOptions);
+    m_echoBackend->setObjectName("echoBackend"); m_echoBackend->setCompactWidth(75);
+    m_echoBackend->addItems({"cpu","npu"});m_echoBackend->setLabels({{"cpu","CPU"},{"npu","NPU*"}});
+    m_echoBackend->setSelectionHint("NPU is experimental and must pass correctness and speed checks. No NVIDIA GPU fallback.");
+    m_echoBackend->setCurrentText(qString(m_defaults.recordAudioEchoBackend));
+    m_echoBackend->setOnChanged([this] {
+        m_defaults.recordAudioEchoBackend=m_echoBackend->currentText().toStdString();
+        hyprcapture::ui::saveAecPreferences(m_defaults);refreshAecStatus();updateSoundMeter();
+    });
+    aecLayout->addWidget(m_echoBackend);
+    auto* retest = new QPushButton("Retest",m_aecOptions);retest->setObjectName("aecRetest");
+    retest->setToolTip("Download missing models and retest this computer without microphone capture");
+    connect(retest,&QPushButton::clicked,this,[this]{refreshAecStatus(true);});aecLayout->addWidget(retest);
+    m_aecStatus = new QLabel("AEC · checking",m_aecOptions);m_aecStatus->setObjectName("aecStatus");
+    m_aecStatus->setMinimumWidth(1);m_aecStatus->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Preferred);
+    aecLayout->addWidget(m_aecStatus);
+    aecLayout->addStretch();
+    rootLayout->addWidget(m_aecOptions, 0, Qt::AlignHCenter);
+    QTimer::singleShot(0,this,[this]{refreshAecStatus();});
+    m_soundMixer = new QWidget(m_toolbar);
+    m_soundMixer->setObjectName("soundMixer");
+    auto* mixerLayout = new QHBoxLayout(m_soundMixer);
+    mixerLayout->setContentsMargins(0, 2, 0, 2); mixerLayout->setSpacing(14);
+    auto channel = [this, mixerLayout](const QString& name, QSlider*& slider, AudioMeter*& meter, std::int64_t& gain) {
+        auto* strip = new QWidget(m_soundMixer);
+        auto* layout = new QVBoxLayout(strip); layout->setContentsMargins(0, 0, 0, 0); layout->setSpacing(2);
+        auto* label = new QLabel(strip);
+        slider = new QSlider(Qt::Horizontal, strip);
+        slider->setObjectName(name.toLower() + "Gain"); slider->setAccessibleName(name + " gain in dB");
+        slider->setRange(-61, 24); slider->setValue(gain); slider->setMinimumWidth(90);
+        meter = new AudioMeter(strip); meter->setObjectName(name.toLower() + "Meter"); meter->setGain(gain);
+        auto updateGain = [label, meter, name, &gain](int value) {
+            gain = value; meter->setGain(value);
+            label->setText(name + "   " + (value == -61 ? QString("Mute") : QString::number(value) + " dB"));
+        };
+        updateGain(gain); connect(slider, &QSlider::valueChanged, this, updateGain);
+        auto* title = new QHBoxLayout; title->setSpacing(4); title->addWidget(label); title->addStretch();
+        layout->addLayout(title); layout->addWidget(slider); layout->addWidget(meter);
+        mixerLayout->addWidget(strip, 1);
+    };
+    channel("Sound", m_systemGain, m_systemMeter, m_defaults.recordAudioSystemGain);
+    channel("Mic", m_micGain, m_micMeter, m_defaults.recordAudioMicGain);
+    rootLayout->addWidget(m_soundMixer, 0, Qt::AlignHCenter);
+    auto* meterLifecycle = new QTimer(this);
+    connect(meterLifecycle, &QTimer::timeout, this, &CaptureOverlay::updateSoundMeter);
+    meterLifecycle->start(100);
+    refreshSoundDevices();
+
 
     m_recordWarning = new QLabel(m_toolbar);
     m_recordWarning->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
@@ -2062,6 +2264,7 @@ void CaptureOverlay::hideOptionPopups() {
         m_fullscreenScope->hidePopup();
     if (m_windowBackground)
         m_windowBackground->hidePopup();
+    for (auto* select : {m_soundMode, m_soundOutput, m_soundInput, m_soundPreset}) if (select) select->hidePopup();
     if (m_recordCodec)
         m_recordCodec->hidePopup();
     if (m_recordFormat)
@@ -2419,17 +2622,14 @@ QString CaptureOverlay::recordOptionsConflict() const {
         return QStringLiteral("mp4 does not support transparency");
     if (alphaRequested && format == "mov")
         return QStringLiteral("mov alpha is not supported by this encoder");
-    if (format == "webm" && alphaRequested && codec != "auto" && codec != "vp9" && codec != "vp9-vaapi")
+    if (format == "webm" && alphaRequested && codec != "auto" && codec != "vp9")
         return QStringLiteral("webm transparency requires vp9");
-    if (format == "webm" && codec != "auto" && codec != "vp9" && codec != "vp9-vaapi" && codec != "av1" && codec != "av1-vaapi")
+    if (format == "webm" && codec != "auto" && codec != "vp9" && codec != "av1")
         return QStringLiteral("webm requires vp9 or av1");
     if (format == "mkv" && alphaRequested && codec != "auto" && codec != "ffv1")
         return QStringLiteral("mkv transparency requires ffv1");
-    if ((format == "mp4" || format == "mov") && (codec == "vp9" || codec == "vp9-vaapi" || codec == "ffv1"))
+    if ((format == "mp4" || format == "mov") && (codec == "vp9" || codec == "ffv1"))
         return format + QStringLiteral(" requires h264, h265, or av1");
-    if (alphaRequested && isHardwareAlphaCandidate(codec) && !alphaProbeSucceeded(format, codec))
-        return QStringLiteral("selected hardware encoder does not preserve transparency");
-
     return {};
 }
 
@@ -2486,6 +2686,145 @@ void CaptureOverlay::updateRecordWarning() {
     relayoutToolbar();
 }
 
+void CaptureOverlay::refreshSoundDevices() {
+    if (m_soundDevicesLoading || !m_soundInput) return;
+    m_soundDevicesLoading = true;
+    auto* process = new QProcess(this);
+    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, process](int code, QProcess::ExitStatus status) {
+        m_soundDevicesLoading = false;
+        const auto object = QJsonDocument::fromJson(process->readAllStandardOutput()).object();
+        if (code == 0 && status == QProcess::NormalExit) {
+            const auto fill = [](InlineSelect* select, const QJsonArray& devices, bool output) {
+                const auto current = select->currentText();
+                QStringList names{"default"};
+                std::map<QString, QString> labels{{"default", "System default"}};
+                if (output) { names.prepend("auto"); labels["auto"] = "Auto"; }
+                for (const auto& value : devices) {
+                    const auto device = value.toObject();
+                    const auto name = device.value("name").toString();
+                    if (name.isEmpty() || names.contains(name)) continue;
+                    names << name;
+                    auto description = device.value("description").toString();
+                    labels[name] = description.isEmpty() ? name : description;
+                }
+                if (!names.contains(current)) { names << current; labels[current] = current + " (unavailable)"; }
+                select->setLabels(labels); select->addItems(names); select->setCurrentText(current);
+            };
+            auto outputs = object.value("outputs").toArray();
+            for (const auto& window : object.value("windows").toArray()) outputs.append(window);
+            fill(m_soundOutput, outputs, true);
+            fill(m_soundInput, object.value("inputs").toArray(), false);
+            m_soundOptions->setToolTip({});
+        } else m_soundOptions->setToolTip("Audio devices unavailable; video recording remains available");
+        process->deleteLater();
+    });
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) { m_soundDevicesLoading = false; process->deleteLater(); }
+    });
+    QTimer::singleShot(4000, process, [process] { if (process->state() != QProcess::NotRunning) process->kill(); });
+    process->start(QCoreApplication::applicationFilePath(), {"--sound-list"});
+}
+
+void CaptureOverlay::refreshAecStatus(bool retest) {
+    if (!m_aecStatus || m_recordActive) return;
+    if (m_aecChecking) {
+        if (m_defaults.recordAudioEchoCancellation == 0)
+            for (auto* check : findChildren<QProcess*>())
+                if (check->property("aecCheck").toBool() && check->state() != QProcess::NotRunning) check->kill();
+        return;
+    }
+    m_aecChecking = true;
+    updateSoundMeter();
+    m_aecStatus->setText("AEC · checking");
+    const auto backend = qString(m_defaults.recordAudioEchoBackend);
+    auto* process = new QProcess(this);
+    process->setProperty("aecCheck", true);
+    QStringList args{"--install"};
+    if (!retest && m_defaults.recordAudioEchoCancellation == 0) args = {"--status", "0"};
+    if (retest) args << "--force";
+    if (backend == "npu") args << "--npu";
+    auto finish = [this, process, backend] {
+        process->deleteLater();
+        if (backend != qString(m_defaults.recordAudioEchoBackend)) { m_aecChecking=false; refreshAecStatus(); return; }
+        auto* status = new QProcess(this);
+        auto done = [this, status] {
+            const auto object=QJsonDocument::fromJson(status->readAllStandardOutput()).object();
+            const auto text=object["description"].toString("AEC · installation required");
+            m_aecStatus->setText(text);m_aecStatus->setToolTip(text);m_aecChecking=false;
+            m_meterKey.clear();status->deleteLater();updateSoundMeter();
+        };
+        connect(status,qOverload<int,QProcess::ExitStatus>(&QProcess::finished),this,[done](int,QProcess::ExitStatus){done();});
+        connect(status,&QProcess::errorOccurred,this,[done](QProcess::ProcessError e){if(e==QProcess::FailedToStart)done();});
+        QStringList statusArgs{"--status",QString::number(m_defaults.recordAudioEchoCancellation)};
+        if(qString(m_defaults.recordAudioEchoBackend)=="npu")statusArgs<<"--npu";
+        status->start(hyprcapture::audio::aec::workerPath(),statusArgs);
+    };
+    connect(process,qOverload<int,QProcess::ExitStatus>(&QProcess::finished),this,[finish](int,QProcess::ExitStatus){finish();});
+    connect(process,&QProcess::errorOccurred,this,[finish](QProcess::ProcessError e){if(e==QProcess::FailedToStart)finish();});
+    QTimer::singleShot(180000,process,[process]{if(process->state()!=QProcess::NotRunning)process->kill();});
+    process->start(hyprcapture::audio::aec::workerPath(),args);
+}
+
+void CaptureOverlay::updateSoundMeter() {
+    const bool wanted = !m_aecChecking && isVisible() && m_overlayActive && m_soundMixer && m_soundMixer->isVisible();
+    const auto* target = selectedWindow();
+    if (!target) target = hoveredWindow();
+    const auto source = hyprcapture::audio::resolveOutput(m_defaults.recordAudioOutput, m_mode, target ? target->address.toStdString() : "");
+    if (m_soundOutput) {
+        const bool windowSource = source.starts_with("window:");
+        QString hint;
+        if (m_defaults.recordAudioOutput == "auto") hint = windowSource ? (target ? "Auto: " + target->title : "Auto: choose a window") : "Auto: system default output";
+        if (windowSource) hint += (hint.isEmpty() ? "" : "\n") + QString("Captures the window application's audio; windows sharing a process may share audio.");
+        m_soundOutput->setSelectionHint(hint);
+    }
+    // Preview both channels independently of which channels will be recorded.
+    const QStringList args{"--sound-meter", "mix",
+                           qString(source), qString(m_defaults.recordAudioInput), QString::number(m_defaults.recordAudioEchoCancellation), qString(m_defaults.recordAudioEchoBackend)};
+    const QString key = args.join(QChar(0x1f));
+    if (m_meterProcess && (!wanted || key != m_meterKey)) {
+        m_meterProcess->disconnect(this);
+        m_meterProcess->kill();
+        connect(m_meterProcess, &QProcess::finished, m_meterProcess, &QObject::deleteLater);
+        if (m_meterProcess->state() == QProcess::NotRunning) m_meterProcess->deleteLater();
+        m_meterProcess = nullptr; m_meterKey.clear();
+        m_systemMeter->reset(); m_micMeter->reset();
+    }
+    if (!wanted) { m_meterKey.clear(); return; }
+    if (m_meterProcess || m_meterKey == key) return;
+    m_meterKey = key;
+    auto* process = new QProcess(this); m_meterProcess = process;
+    auto buffer = std::make_shared<QByteArray>();
+    connect(process, &QProcess::readyReadStandardOutput, this, [this, process, buffer] {
+        buffer->append(process->readAllStandardOutput());
+        while (buffer->contains('\n')) {
+            const int end = buffer->indexOf('\n');
+            const auto object = QJsonDocument::fromJson(buffer->left(end)).object(); buffer->remove(0, end + 1);
+            if (object.contains("error")) m_systemMeter->setToolTip(object["error"].toString());
+            if (object.contains("aec") && m_aecStatus) {
+                const auto state = object["aec"].toString();
+                const auto text = state == "unavailable" ? "AEC unavailable · raw mic" : object["description"].toString(
+                    hyprcapture::audio::aec::description(object,int(m_defaults.recordAudioEchoCancellation)));
+                m_aecStatus->setText(text); m_aecStatus->setToolTip(text);
+            }
+            if (!object.contains("levels")) continue;
+            const auto levels = object["levels"].toObject();
+            auto apply = [&levels](AudioMeter* meter, const char* role) {
+                const auto data = levels[role].toObject();
+                meter->setLevels(data["peak"].toDouble(), data["rms"].toDouble(), data["available"].toBool());
+            };
+            apply(m_systemMeter, "System"); apply(m_micMeter, "Microphone");
+        }
+        if (buffer->size() > 8192) buffer->clear();
+    });
+    auto failed = [this, process] {
+        if (m_meterProcess == process) { m_meterProcess = nullptr; m_systemMeter->reset(); m_micMeter->reset(); }
+        process->deleteLater();
+    };
+    connect(process, &QProcess::finished, this, [failed](int, QProcess::ExitStatus) { failed(); });
+    connect(process, &QProcess::errorOccurred, this, [failed](QProcess::ProcessError error) { if (error == QProcess::FailedToStart) failed(); });
+    process->start(QCoreApplication::applicationFilePath(), args);
+}
+
 void CaptureOverlay::updateRecordOptionsVisibility() {
     if (!m_recordOptions)
         return;
@@ -2504,6 +2843,24 @@ void CaptureOverlay::updateRecordOptionsVisibility() {
     updateSelect(m_recordFps, visible);
     updateSelect(m_recordDuration, imageAnimation);
     updateSelect(m_recordBackend, visible && !imageAnimation);
+    updateSelect(m_soundMode, visible);
+    updateSelect(m_soundOutput, visible);
+    updateSelect(m_soundInput, visible);
+    m_soundOutput->setEnabled(!imageAnimation);
+    m_soundInput->setEnabled(!imageAnimation);
+    m_soundOptions->setVisible(visible);
+    m_aecOptions->setVisible(visible && !imageAnimation);
+    updateSelect(m_soundPreset, visible);
+    m_soundPreset->setEnabled(!imageAnimation);
+    const bool manual = visible && !imageAnimation && m_defaults.recordAudioMix == "manual";
+    m_soundMixer->setVisible(manual);
+    m_systemGain->setEnabled(true);
+    m_micGain->setEnabled(true);
+    m_soundMode->setEnabled(!imageAnimation);
+    m_soundMode->setToolTip(imageAnimation ? "Animation formats do not support sound" : "Recording sound");
+    if (imageAnimation) m_soundMode->setCurrentText("Not supported");
+    else m_soundMode->setCurrentText(qString(hyprcapture::toString(m_defaults.recordAudio)));
+
 
     m_recordOptions->setVisible(visible);
     m_recordOptions->setSizePolicy(visible ? QSizePolicy::Fixed : QSizePolicy::Ignored, visible ? QSizePolicy::Fixed : QSizePolicy::Ignored);
@@ -3583,6 +3940,20 @@ void CaptureOverlay::relayoutToolbar() {
     if (!m_toolbar)
         return;
 
+    if (m_soundOptions && m_soundOutput && m_soundInput) {
+        const int count = (m_soundOutput->isVisible() ? 1 : 0) + (m_soundInput->isVisible() ? 1 : 0);
+        const int deviceWidth = std::clamp((width() - 64 - 220) / std::max(1, count), 45, 210);
+        m_soundMode->setPrefix(width() < 500 ? "" : "Sound");
+        m_soundOutput->setPrefix(width() < 500 ? "" : "Source");
+        m_soundInput->setPrefix(width() < 500 ? "" : "Mic");
+        m_soundMode->setCompactWidth(width() < 500 ? 75 : 155);
+        m_soundPreset->setCompactWidth(width() < 500 ? 85 : 130);
+        if (m_soundMixer) m_soundMixer->setFixedWidth(std::min(550, std::max(1, width() - 52)));
+        if (m_aecOptions) m_aecOptions->setFixedWidth(std::min(550, std::max(1, width() - 52)));
+        m_soundOutput->setCompactWidth(deviceWidth);
+        m_soundInput->setCompactWidth(deviceWidth);
+        m_soundOptions->setFixedWidth(std::min(m_soundOptions->sizeHint().width(), std::max(1, width() - 52)));
+    }
     m_toolbar->setMinimumWidth(0);
     m_toolbar->setMaximumWidth(QWIDGETSIZE_MAX);
     m_toolbar->adjustSize();
@@ -3838,6 +4209,9 @@ QString CaptureOverlay::prepareRecordingRequest() {
     const bool imageAnimation = isImageAnimationRecordFormat(recordFormat);
     request.defaults.recordFormat = recordFormat.toStdString();
     request.defaults.recordFilenameTemplate = recordTemplateWithFormat(m_defaults.recordFilenameTemplate, recordFormat).toStdString();
+    request.defaults.recordAudio = imageAnimation ? hyprcapture::RecordAudio::Off : m_defaults.recordAudio;
+    request.defaults.recordAudioOutput = m_defaults.recordAudioOutput;
+    request.defaults.recordAudioInput = m_defaults.recordAudioInput;
     request.defaults.recordCodec = imageAnimation ? recordFormat.toStdString() : codecConfigFromChoice(currentRecordCodec()).toStdString();
     request.defaults.recordFps = currentRecordFps();
     request.defaults.recordMaxSeconds = currentRecordMaxSeconds();

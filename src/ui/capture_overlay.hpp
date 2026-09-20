@@ -14,6 +14,7 @@
 #include <vector>
 
 class QButtonGroup;
+class QCheckBox;
 class QEnterEvent;
 class QGraphicsOpacityEffect;
 class QLabel;
@@ -25,6 +26,9 @@ class QWheelEvent;
 class QPropertyAnimation;
 class QScreen;
 class InlineSelect;
+class AudioMeter;
+class QSlider;
+class QProcess;
 
 namespace hyprcapture::ui {
 struct ClipboardSnapshotData;
@@ -235,6 +239,29 @@ class CaptureOverlay final : public QMainWindow {
     QPropertyAnimation* m_fadeAnimation = nullptr;
     InlineSelect* m_fullscreenScope = nullptr;
     InlineSelect* m_windowBackground = nullptr;
+    void saveRememberedSettings();
+    void refreshSoundDevices();
+    void updateSoundMeter();
+    void refreshAecStatus(bool retest = false);
+    QWidget* m_aecOptions = nullptr;
+    InlineSelect* m_echoCancellation = nullptr;
+    InlineSelect* m_echoBackend = nullptr;
+    QLabel* m_aecStatus = nullptr;
+    bool m_aecChecking = false;
+    QWidget* m_soundMixer = nullptr;
+    InlineSelect* m_soundPreset = nullptr;
+    QSlider* m_systemGain = nullptr;
+    QSlider* m_micGain = nullptr;
+    AudioMeter* m_systemMeter = nullptr;
+    AudioMeter* m_micMeter = nullptr;
+    QProcess* m_meterProcess = nullptr;
+    QString m_meterKey;
+
+    QWidget*      m_soundOptions = nullptr;
+    InlineSelect* m_soundMode = nullptr;
+    InlineSelect* m_soundOutput = nullptr;
+    InlineSelect* m_soundInput = nullptr;
+    bool m_soundDevicesLoading = false;
     QWidget*      m_recordOptions = nullptr;
     InlineSelect* m_recordCodec = nullptr;
     InlineSelect* m_recordFormat = nullptr;

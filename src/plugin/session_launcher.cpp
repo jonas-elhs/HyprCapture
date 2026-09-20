@@ -314,6 +314,10 @@ std::optional<int> configureSpawnFileDescriptorPolicy(SpawnFileActions& actions,
 
 } // namespace
 
+std::optional<std::string> recordingHelperPath(const CaptureDefaults& defaults) {
+    return firstRunnableHelper(defaults.helper);
+}
+
 LaunchResult launchHelper(const LaunchRequest& request) {
     const auto helper = firstRunnableHelper(request.defaults.helper);
     if (!helper)
@@ -360,6 +364,8 @@ LaunchResult launchHelper(const LaunchRequest& request) {
     args.push_back(boolArg(request.defaults.screenshotNotification));
     args.push_back("--include-cursor");
     args.push_back(boolArg(request.defaults.includeCursor));
+    args.push_back("--remember-settings");
+    args.push_back(boolArg(request.defaults.rememberSettings));
     args.push_back("--confirm-before-capture");
     args.push_back(boolArg(request.defaults.confirmBeforeCapture));
     args.push_back("--fushion-mode");
@@ -390,6 +396,14 @@ LaunchResult launchHelper(const LaunchRequest& request) {
     args.push_back(request.defaults.recordFormat);
     args.push_back("--record-transparent-format");
     args.push_back(request.defaults.recordTransparentFormat);
+    args.insert(args.end(), {"--record-audio", toString(request.defaults.recordAudio),
+                             "--record-audio-output", request.defaults.recordAudioOutput,
+                             "--record-audio-input", request.defaults.recordAudioInput,
+                             "--record-audio-mix", request.defaults.recordAudioMix,
+                             "--record-audio-echo-cancellation", std::to_string(request.defaults.recordAudioEchoCancellation),
+                             "--record-audio-echo-backend", request.defaults.recordAudioEchoBackend,
+                             "--record-audio-system-gain", std::to_string(request.defaults.recordAudioSystemGain),
+                             "--record-audio-mic-gain", std::to_string(request.defaults.recordAudioMicGain)});
     args.push_back("--record-codec");
     args.push_back(request.defaults.recordCodec);
     args.push_back("--record-transparent-codec");
@@ -501,7 +515,7 @@ LaunchResult launchHelper(const LaunchRequest& request) {
     return {.success = true};
 }
 
-LaunchResult launchRecordingResultHelper(const CaptureDefaults& defaults, const std::string& outputPath) {
+LaunchResult launchRecordingResultHelper(const CaptureDefaults& defaults, const std::string& outputPath, const std::string& pendingSocket) {
     if (outputPath.empty())
         return {.success = false, .error = "recording output path missing"};
 
@@ -513,6 +527,10 @@ LaunchResult launchRecordingResultHelper(const CaptureDefaults& defaults, const 
     args.push_back(*helper);
     args.push_back("--recording-result");
     args.push_back(outputPath);
+    if (!pendingSocket.empty()) {
+        args.push_back("--recording-pending-socket");
+        args.push_back(pendingSocket);
+    }
     args.push_back("--clipboard");
     args.push_back(boolArg(defaults.clipboard));
     args.push_back("--thumbnail");
