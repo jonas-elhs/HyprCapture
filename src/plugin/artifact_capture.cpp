@@ -303,7 +303,7 @@ void noteWindowStreamDiagnostic(std::string_view reason) {
     if (count >= 6)
         return;
     ++count;
-    Log::logger->log(Log::WARN, "[hyprcapture] window stream diagnostic {} (#{})", reason, count);
+    LOG(Log::WARN, "[hyprcapture] window stream diagnostic {} (#{})", reason, count);
 }
 
 struct WindowStreamSession {
@@ -3746,12 +3746,12 @@ bool captureWindowGpuStreamFrame(WindowStreamSession& session, const WindowStrea
     const CBox sampledBox = renderedWindowBox(window, window->getFullWindowBoundingBox());
     const CBox sampledVisibleBox = renderedWindowGoalMainSurfaceBox(window);
     std::optional<gpuwire::InputGeometry> frozenInput;
-    if (!window->m_isX11 && session.targetSurface && window->getPID() > 0) {
+    if (!window->backend().isX11() && session.targetSurface && window->backend().pid() > 0) {
         const auto size = session.targetSurface->m_current.size;
         frozenInput = gpuwire::InputGeometry{
             .window = reinterpret_cast<std::uintptr_t>(window.get()),
             .surface = reinterpret_cast<std::uintptr_t>(session.targetSurface.get()),
-            .pid = static_cast<std::uint64_t>(window->getPID()),
+            .pid = static_cast<std::uint64_t>(window->backend().pid()),
             .contentX = sampledVisibleBox.x, .contentY = sampledVisibleBox.y,
             .contentWidth = sampledVisibleBox.w, .contentHeight = sampledVisibleBox.h,
             .surfaceWidth = size.x, .surfaceHeight = size.y,
