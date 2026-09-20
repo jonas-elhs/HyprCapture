@@ -168,6 +168,9 @@ install(PROGRAMS scripts/build-aec-runtime.sh DESTINATION ${CMAKE_INSTALL_BINDIR
 install(PROGRAMS scripts/install-aec.sh DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME hyprcapture-install-aec)
 install(FILES resources/aec/DTLN-LICENSE.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/hyprcapture)
 
+option(HYPRCAPTURE_ENABLE_NIX_SANDBOX_INCOMPATIBLE_TESTS
+    "Enable tests requiring root-owned executables to be visible as root"
+    ON)
 if(BUILD_TESTING)
   add_library(hyprcapture-fake-tflite SHARED tests/aec_fake_tflite.cpp)
   add_executable(hyprcapture-aec-spa-test tests/aec_spa_test.cpp)
@@ -196,17 +199,26 @@ if(BUILD_TESTING)
   target_compile_options(hyprcapture-audio-timeline-test PRIVATE -UNDEBUG)
   add_test(NAME hyprcapture-audio-timeline-test COMMAND hyprcapture-audio-timeline-test)
   find_package(Python3 COMPONENTS Interpreter)
-  if(Python3_Interpreter_FOUND)
-    add_test(NAME hyprcapture-audio-finalize-test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/audio_finalize_test.py $<TARGET_FILE:hyprcapture-ui>)
-    set_tests_properties(hyprcapture-audio-finalize-test PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
+
+  if(HYPRCAPTURE_ENABLE_NIX_SANDBOX_INCOMPATIBLE_TESTS)
+    if(Python3_Interpreter_FOUND)
+      add_test(NAME hyprcapture-audio-finalize-test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/audio_finalize_test.py $<TARGET_FILE:hyprcapture-ui>)
+      set_tests_properties(hyprcapture-audio-finalize-test PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
+
+      add_test(NAME hyprcapture-recording-timestamps-test COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/recording_timestamps_test.py
+        $<TARGET_FILE:hyprcapture-timestamped-rgba-fixture> $<TARGET_FILE:hyprcapture-ui>)
+      set_tests_properties(hyprcapture-recording-timestamps-test PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
+    endif()
+
+    add_executable(hyprcapture-supervised-process-test
+      tests/supervised_process_test.cpp
+      src/shared/supervised_process.cpp
+    )
+    target_include_directories(hyprcapture-supervised-process-test PRIVATE src)
+    add_test(NAME hyprcapture-supervised-process-test COMMAND hyprcapture-supervised-process-test)
+    set_tests_properties(hyprcapture-supervised-process-test PROPERTIES TIMEOUT 10)
   endif()
-  add_executable(hyprcapture-supervised-process-test
-    tests/supervised_process_test.cpp
-    src/shared/supervised_process.cpp
-  )
-  target_include_directories(hyprcapture-supervised-process-test PRIVATE src)
-  add_test(NAME hyprcapture-supervised-process-test COMMAND hyprcapture-supervised-process-test)
-  set_tests_properties(hyprcapture-supervised-process-test PROPERTIES TIMEOUT 10)
 
   add_executable(hyprcapture-config-test
     tests/config_test.cpp
@@ -267,12 +279,6 @@ if(BUILD_TESTING)
   add_executable(hyprcapture-timestamped-rgba-fixture tests/timestamped_rgba_fixture.cpp src/plugin/timestamped_rgba.cpp)
   target_include_directories(hyprcapture-timestamped-rgba-fixture PRIVATE src)
   target_link_libraries(hyprcapture-timestamped-rgba-fixture PRIVATE PkgConfig::FFMPEG_MUX)
-  if(Python3_Interpreter_FOUND)
-    add_test(NAME hyprcapture-recording-timestamps-test COMMAND ${Python3_EXECUTABLE}
-      ${CMAKE_CURRENT_SOURCE_DIR}/tests/recording_timestamps_test.py
-      $<TARGET_FILE:hyprcapture-timestamped-rgba-fixture> $<TARGET_FILE:hyprcapture-ui>)
-    set_tests_properties(hyprcapture-recording-timestamps-test PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
-  endif()
 
   add_executable(hyprcapture-rgba-transform-test
     tests/rgba_transform_test.cpp
